@@ -431,7 +431,11 @@ function computeAnalytics(rawItems, options = {}) {
     const before = parseTimestamp(winFrom ?? options.coverage.rolledFrom);
     const after = parseTimestamp(winTo);
     if (before !== null && after !== null && range.start < after && range.end > before)
-      notes.push({ code: 'rolled-up', count: options.coverage.rolledMonths, from: options.coverage.rolledFrom || null });
+      notes.push({
+        code: 'rolled-up',
+        count: options.coverage.rolledMonths,
+        from: options.coverage.rolledFrom || null
+      });
   }
   if (!rate.usable && stats.totals.convertedCount === 0 && stats.totals.count > 0)
     notes.push({ code: 'no-rate', count: stats.totals.count });
@@ -654,7 +658,8 @@ function buildSeries(items, range, tz) {
   // boundary (today resolves to "now", but a custom range ends at local midnight) is left alone, so a one-day custom
   // range stays 24 points instead of gaining a second day of zeros.
   let seriesEnd = range.end;
-  if (range.granularity === 'hour' && startOfDay(range.end, tz) !== range.end) seriesEnd = startOfNextDay(range.end, tz);
+  if (range.granularity === 'hour' && startOfDay(range.end, tz) !== range.end)
+    seriesEnd = startOfNextDay(range.end, tz);
   const starts = bucketStarts(range.start, seriesEnd, tz, range.granularity);
   const byKey = new Map();
   for (const it of items) {
