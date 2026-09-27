@@ -13,6 +13,7 @@ const { createServer, parseEventTime, parseTz } = require('../server/server');
 
 const TZ = 210; // Asia/Tehran, the audience the app is built for
 const NOW = Date.parse('2026-09-24T18:00:00Z'); // a Thursday evening in Tehran
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const run = (items, opts = {}) => A.computeAnalytics(items, { now: NOW, tz: TZ, rate: { value: 1000000 }, ...opts });
 
@@ -1162,6 +1163,109 @@ test('/api/analytics serves the stored history, honours range and tz, and hides 
     r.end();
   });
   assert.equal(posted, 404);
+});
+
+test('the Settings switch stops the donation history, and it is on unless the user turned it off', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sahne-test-'));
+  const port = 8500 + Math.floor(Math.random() * 100);
+  // no `recordHistory` key at all: an existing config.json must default to recording, not to nothing
+  fs.writeFileSync(
+    path.join(dir, 'config.json'),
+    JSON.stringify({
+      port,
+      rate: { auto: false, manual: 1000000 },
+      kick: { enabled: false },
+      showAlertWithoutMedia: false, // an empty media folder then skips every alert at once, so the queue never waits
+      app: { autostart: false }
+    })
+  );
+  const srv = createServer({
+    dataDir: dir,
+    publicDir: path.join(__dirname, '..', 'public'),
+    appVersion: 'test',
+    testHooks: { offline: true }
+  });
+  await srv.start();
+  const es = http.get({ host: '127.0.0.1', port, path: '/events?role=overlay' }, res => {
+    res.setEncoding('utf8');
+    res.on('data', () => {});
+  });
+  await sleep(150); // a Browser Source must be open, or a tip waits in the queue and is never played
+  srv.testHooks.setQueueDelay(0); // no inter-alert gap, so the three donations below follow each other at once
+  t.after(async () => {
+    es.destroy();
+    await srv.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const req = (method, p, body) =>
+    new Promise((resolve, reject) => {
+      const payload = body === undefined ? null : JSON.stringify(body);
+      const r = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: p,
+          method,
+          headers: {
+            Origin: `http://127.0.0.1:${port}`,
+            ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {})
+          }
+        },
+        res => {
+          let d = '';
+          res.on('data', c => (d += c));
+          res.on('end', () => resolve({ status: res.statusCode, body: d }));
+        }
+      );
+      r.on('error', reject);
+      if (payload) r.write(payload);
+      r.end();
+    });
+  const page = async () => JSON.parse((await req('GET', '/api/analytics?range=today')).body);
+  const cfg = async () => JSON.parse((await req('GET', '/api/config')).body).config.app;
+  const tip = id => ({
+    stripe_pi_id: id,
+    tipper_name: 'Donor',
+    amount_total: 500,
+    approval_status: 'approved',
+    is_local: true, // a local event is played (and therefore recorded) without a KickBot capture
+    created_at: new Date().toISOString()
+  });
+  const stored = () =>
+    fs
+      .readdirSync(dir)
+      .filter(f => f.startsWith('analytics-') && f.endsWith('.ndjson'))
+      .flatMap(f => fs.readFileSync(path.join(dir, f), 'utf8').split('\n'))
+      .filter(Boolean)
+      .join('\n');
+
+  assert.equal((await cfg()).recordHistory, true, 'recording is on by default');
+  assert.equal((await page()).recording, true);
+  srv.testHooks.injectTip(tip('pi_switch_on'));
+  await sleep(150);
+  assert.equal((await page()).totals.count, 1, 'a donation is recorded while the switch is on');
+
+  assert.equal((await req('POST', '/api/config', { app: { recordHistory: false } })).status, 200);
+  assert.equal((await cfg()).recordHistory, false, 'the switch can be turned off');
+  const off = await page();
+  assert.equal(off.recording, false, 'the page is told that recording is off');
+  assert.ok(
+    off.notes.some(n => n.code === 'recording-off'),
+    'and the UI is given the note that explains why the numbers stop'
+  );
+  assert.equal(off.totals.count, 1, 'turning the switch off keeps the history that was already written');
+
+  srv.testHooks.injectTip(tip('pi_switch_off'));
+  await sleep(150);
+  assert.equal((await page()).totals.count, 1, 'nothing new is counted while the switch is off');
+  assert.ok(!stored().includes('pi_switch_off'), 'and nothing new reaches the disk');
+  assert.ok(stored().includes('pi_switch_on'), 'the file that was written earlier is untouched');
+
+  await req('POST', '/api/config', { app: { recordHistory: true } });
+  srv.testHooks.injectTip(tip('pi_switch_again'));
+  await sleep(150);
+  assert.equal((await page()).totals.count, 2, 'recording resumes when the switch is turned back on');
 });
 
 test('analytics helpers are pure and exported for the server and the tests', () => {

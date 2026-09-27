@@ -97,7 +97,7 @@ const DEFAULT_CONFIG = {
     showNewSubs: true
   },
   se: { channelId: null, username: null, provider: null }, // StreamElements account (the JWT token is stored separately, encrypted)
-  app: { autostart: true, updateCheck: true, updateNotifiedFor: null }
+  app: { autostart: true, updateCheck: true, updateNotifiedFor: null, recordHistory: true }
 };
 const FONTS = ['Vazirmatn', 'Estedad', 'Lalezar', 'Inter', 'Poppins', 'Segoe UI', 'Tahoma'];
 const ENUMS = {
@@ -500,6 +500,7 @@ function createServer(opts) {
       app: { ...DEFAULT_CONFIG.app, ...(c.app || {}) }
     };
     merged.app.updateCheck = merged.app.updateCheck !== false;
+    merged.app.recordHistory = merged.app.recordHistory !== false;
     if (!/^\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(String(merged.app.updateNotifiedFor || '')))
       merged.app.updateNotifiedFor = null;
     // secret: encrypted field preferred; legacy plaintext migrated on first save
@@ -598,7 +599,11 @@ function createServer(opts) {
   // the queue. See server/analytics-store.js for why a file and not a database.
   const tzOffsetMin = -new Date().getTimezoneOffset(); // minutes east of UTC; the machine's zone is the app's zone
   const analytics = createAnalyticsStore(DATA, { tz: tzOffsetMin });
+  // Settings → برنامه → «ثبت تاریخچه‌ی دونیت‌ها». Off means nothing new is written to disk; what was already stored stays
+  // until the user clears it, so turning the switch off never silently deletes data.
+  const historyOn = () => config.app.recordHistory !== false;
   function recordHistory(t, played) {
+    if (!historyOn()) return;
     try {
       analytics.record({
         id: t.stripe_pi_id,
@@ -2302,7 +2307,9 @@ function createServer(opts) {
           config.app = {
             ...config.app,
             autostart: body.app.autostart === undefined ? config.app.autostart : !!body.app.autostart,
-            updateCheck: body.app.updateCheck === undefined ? config.app.updateCheck !== false : !!body.app.updateCheck
+            updateCheck: body.app.updateCheck === undefined ? config.app.updateCheck !== false : !!body.app.updateCheck,
+            recordHistory:
+              body.app.recordHistory === undefined ? config.app.recordHistory !== false : !!body.app.recordHistory
           };
         if (body.kick && typeof body.kick === 'object') {
           const k = body.kick,
@@ -2727,6 +2734,8 @@ function createServer(opts) {
             donorFirstSeen: buildDonorFirstSeen(data)
           });
           result.months = data.months; // rolled-up totals for months whose detail was dropped
+          result.recording = historyOn(); // the page says so when new donations are no longer being stored
+          if (!result.recording) result.notes = [...(result.notes || []), { code: 'recording-off' }];
           return json(res, 200, result);
         } catch (e) {
           log('error', 'محاسبه‌ی آمار ناموفق بود', e.message);
@@ -2843,6 +2852,10 @@ function createServer(opts) {
         injectTip: t => {
           approved.push(t);
           tryNext();
+        },
+        // the value KickBot sends as `queue_delay`, so a test can drop the inter-alert gap instead of waiting it out
+        setQueueDelay: s => {
+          queueDelay = finite(s, 0, 600, queueDelay);
         },
         queueLength: () => approved.length,
         queueIds: () => approved.map(t => t.stripe_pi_id),
