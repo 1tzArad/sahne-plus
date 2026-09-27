@@ -284,6 +284,7 @@ function fillApp() {
   $('#autostart').checked = !!(INFO && INFO.autostart);
   $('#autostart').disabled = !DESK;
   $('#updCheck').checked = !(CFG.app && CFG.app.updateCheck === false);
+  $('#recHistory').checked = !(CFG.app && CFG.app.recordHistory === false);
   $('#updCheck').disabled = !DESK;
   $('#btnOpenData').disabled = !DESK;
   $('#btnOpenLog').disabled = !DESK;
@@ -345,6 +346,13 @@ $('#autostart').onchange = async e => {
 $('#updCheck').onchange = async e => {
   await post('/api/config', { app: { updateCheck: e.target.checked } });
   toast(e.target.checked ? 'بررسی خودکار آپدیت روشن شد' : 'بررسی خودکار آپدیت خاموش شد', 'ok');
+};
+$('#recHistory').onchange = async e => {
+  await post('/api/config', { app: { recordHistory: e.target.checked } });
+  toast(
+    e.target.checked ? 'ثبت تاریخچه‌ی دونیت‌ها روشن شد' : 'ثبت تاریخچه‌ی دونیت‌ها خاموش شد (فایل‌های قبلی پاک نشدند)',
+    'ok'
+  );
 };
 // ---------- updates (desktop app only; checking, downloading and verifying happen in the main process) ----------
 let UPD = null,
