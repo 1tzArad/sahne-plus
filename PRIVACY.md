@@ -26,6 +26,7 @@ All application data lives in `Documents\Sahne Plus`:
 | Alert media you import (videos, images, sounds) | `media\` | copied into this folder; your original files are never modified or deleted |
 | Ids of the last 1000 alerts already shown | `played.json` | prevents replaying a donation after a restart |
 | Diagnostic log | `sahne-plus.log` | connection status, errors, and for each alert: donor/subscriber name, amount, message and the media used. The KickBot key is never written to the log. Rotates at 5 MB. |
+| Donation history for analytics (if enabled) | `analytics-*.ndjson` (one file per month) | Stores donation events with id, timestamp, donor name, amount, currency, toman value, rate, kind, source and whether the alert played. Bounded: at most 5000 events per day, months older than the newest three are rolled up into summaries only. Can be disabled in Settings. |
 
 Electron (the runtime) keeps its own browser profile in `%APPDATA%\SahnePlus` (cache, the last opened page).
 
