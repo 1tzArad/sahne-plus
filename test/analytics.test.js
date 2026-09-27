@@ -93,11 +93,56 @@ test('per-day rates count calendar days touched, not fractional days', () => {
 // ---------------------------------------------------------------------------------------------
 
 const spread = [
-  { id: 'd1', ts: '2026-09-24T08:00:00Z', name: 'Ali', amount: 10, currency: 'USD', toman: 10000000, kind: 'tip', source: 'kickbot' },
-  { id: 'd2', ts: '2026-09-24T09:00:00Z', name: 'Sara', amount: 30, currency: 'USD', toman: 30000000, kind: 'tip', source: 'streamelements' },
-  { id: 'd3', ts: '2026-09-23T09:00:00Z', name: 'Ali', amount: 20, currency: 'USD', toman: 20000000, kind: 'tip', source: 'kickbot' },
-  { id: 'd4', ts: '2026-09-22T09:00:00Z', name: 'Reza', amount: 5, currency: 'USD', toman: 5000000, kind: 'gift', source: 'kick' },
-  { id: 'd5', ts: '2026-09-18T09:00:00Z', name: 'Mina', amount: 4, currency: 'USD', toman: 4000000, kind: 'sub', source: 'kick' }
+  {
+    id: 'd1',
+    ts: '2026-09-24T08:00:00Z',
+    name: 'Ali',
+    amount: 10,
+    currency: 'USD',
+    toman: 10000000,
+    kind: 'tip',
+    source: 'kickbot'
+  },
+  {
+    id: 'd2',
+    ts: '2026-09-24T09:00:00Z',
+    name: 'Sara',
+    amount: 30,
+    currency: 'USD',
+    toman: 30000000,
+    kind: 'tip',
+    source: 'streamelements'
+  },
+  {
+    id: 'd3',
+    ts: '2026-09-23T09:00:00Z',
+    name: 'Ali',
+    amount: 20,
+    currency: 'USD',
+    toman: 20000000,
+    kind: 'tip',
+    source: 'kickbot'
+  },
+  {
+    id: 'd4',
+    ts: '2026-09-22T09:00:00Z',
+    name: 'Reza',
+    amount: 5,
+    currency: 'USD',
+    toman: 5000000,
+    kind: 'gift',
+    source: 'kick'
+  },
+  {
+    id: 'd5',
+    ts: '2026-09-18T09:00:00Z',
+    name: 'Mina',
+    amount: 4,
+    currency: 'USD',
+    toman: 4000000,
+    kind: 'sub',
+    source: 'kick'
+  }
 ];
 
 test('daily aggregation: hourly buckets for today, one point per calendar day', () => {
@@ -305,7 +350,9 @@ test('very large values stay exact and never lose precision or overflow the form
   assert.equal(r.totals.minUsd, 0.5);
   assert.ok(Number.isSafeInteger(r.totals.amountToman));
   assert.equal(r.totals.topShare.top1, Math.round((1250000000000 / 1250000625000) * 10000) / 100);
-  const r2 = run([{ id: 'x', ts: '2026-09-24T08:00:00Z', name: 'A', amount: 0.01, currency: 'USD' }], { range: 'today' });
+  const r2 = run([{ id: 'x', ts: '2026-09-24T08:00:00Z', name: 'A', amount: 0.01, currency: 'USD' }], {
+    range: 'today'
+  });
   assert.equal(r2.totals.amountUsd, 0.01);
   assert.equal(r2.totals.avgUsd, 0.01);
 });
@@ -362,7 +409,13 @@ test('top donors rank by Toman, and new vs returning reflects the whole history 
 test('new vs returning donors uses first-seen, which the caller can supply from outside the window', () => {
   const items = [{ id: 'a', ts: '2026-09-24T08:00:00Z', name: 'Regular', amount: 5, currency: 'USD', toman: 5000000 }];
   const seen = new Map([['Regular', Date.parse('2025-01-01T00:00:00Z')]]);
-  const r = A.computeAnalytics(items, { range: 'today', now: NOW, tz: TZ, rate: { value: 1000000 }, donorFirstSeen: seen });
+  const r = A.computeAnalytics(items, {
+    range: 'today',
+    now: NOW,
+    tz: TZ,
+    rate: { value: 1000000 },
+    donorFirstSeen: seen
+  });
   assert.equal(r.totals.newDonors, 0);
   assert.equal(r.totals.returningDonors, 1);
   // without the index the same donation looks like a first-time donor
@@ -528,7 +581,13 @@ test('the previous-period comparison is null when history does not reach back th
 
 test('a heatmap is withheld while the dataset is too small to be meaningful', () => {
   const few = run(
-    [1, 2, 3].map((i, k) => ({ id: 'h' + k, ts: `2026-09-24T${String(i).padStart(2, '0')}:00:00Z`, name: 'A' + k, amount: 5, currency: 'USD' })),
+    [1, 2, 3].map((i, k) => ({
+      id: 'h' + k,
+      ts: `2026-09-24T${String(i).padStart(2, '0')}:00:00Z`,
+      name: 'A' + k,
+      amount: 5,
+      currency: 'USD'
+    })),
     { range: 'today' }
   );
   assert.equal(few.heatmap.available, false);
@@ -578,7 +637,14 @@ test('the store appends one line per event, groups by local month, and reads the
   const { dir, store } = tempStore();
   try {
     assert.equal(
-      store.record({ id: 'a', at: Date.parse('2026-09-24T08:00:00Z'), name: 'Ali', amount: 10, currency: 'USD', toman: 10000000 }),
+      store.record({
+        id: 'a',
+        at: Date.parse('2026-09-24T08:00:00Z'),
+        name: 'Ali',
+        amount: 10,
+        currency: 'USD',
+        toman: 10000000
+      }),
       true
     );
     // 20:30Z on the 24th belongs to the 25th locally, and both are the same Gregorian month here
@@ -610,7 +676,17 @@ test('the store rejects what is not a donation and never throws into the caller'
     assert.equal(store.record({ id: 'zero', amount: 0 }), false);
     assert.equal(store.record({ id: 'neg', amount: -3 }), false);
     assert.equal(store.record({ id: 'nan', amount: 'x' }), false);
-    assert.equal(store.record({ id: 'ok', at: new Date(NOW - 3600000).toISOString(), amount: '12.5', currency: 'eur', kind: 'nonsense', source: 'evil' }), true);
+    assert.equal(
+      store.record({
+        id: 'ok',
+        at: new Date(NOW - 3600000).toISOString(),
+        amount: '12.5',
+        currency: 'eur',
+        kind: 'nonsense',
+        source: 'evil'
+      }),
+      true
+    );
     store.flush();
     const [item] = store.load().items;
     assert.equal(item.amount, 12.5);
@@ -628,7 +704,8 @@ test('a flood cannot fill the disk: the per-day cap applies to the local day', (
   const { dir, store } = tempStore();
   try {
     const at = Date.parse('2026-09-24T08:00:00Z');
-    for (let i = 0; i < MAX_PER_DAY + 25; i++) store.record({ id: 'f' + i, at: at + i, name: 'A', amount: 1, currency: 'USD' });
+    for (let i = 0; i < MAX_PER_DAY + 25; i++)
+      store.record({ id: 'f' + i, at: at + i, name: 'A', amount: 1, currency: 'USD' });
     store.flush();
     const lines = fs.readFileSync(path.join(dir, 'analytics-2026-09.ndjson'), 'utf8').trim().split('\n');
     assert.equal(lines.length, MAX_PER_DAY);
@@ -642,7 +719,8 @@ test('the per-day cap survives a restart and an invalidated cache, not just the 
   const { dir, store } = tempStore();
   try {
     const at = Date.parse('2026-09-24T08:00:00Z');
-    for (let i = 0; i < MAX_PER_DAY; i++) store.record({ id: 'a' + i, at: at + i, name: 'A', amount: 1, currency: 'USD' });
+    for (let i = 0; i < MAX_PER_DAY; i++)
+      store.record({ id: 'a' + i, at: at + i, name: 'A', amount: 1, currency: 'USD' });
     store.flush();
     // The app is restarted: a brand-new store over the same directory has nothing in memory. Its cap must still see
     // the lines already on disk, or a fresh run would happily write another 5000.
@@ -681,9 +759,30 @@ test('old months are rolled up into a summary and their detail is dropped, witho
   const clock = { now: Date.parse('2026-12-15T12:00:00Z') };
   const { dir, store } = tempStore({ now: () => clock.now });
   try {
-    store.record({ id: 'jan', at: Date.parse('2026-01-10T08:00:00Z'), name: 'Old', amount: 10, currency: 'USD', toman: 8000000 });
-    store.record({ id: 'feb', at: Date.parse('2026-02-10T08:00:00Z'), name: 'Old', amount: 20, currency: 'USD', toman: 17000000 });
-    store.record({ id: 'dec', at: Date.parse('2026-12-10T08:00:00Z'), name: 'New', amount: 5, currency: 'USD', toman: 5000000 });
+    store.record({
+      id: 'jan',
+      at: Date.parse('2026-01-10T08:00:00Z'),
+      name: 'Old',
+      amount: 10,
+      currency: 'USD',
+      toman: 8000000
+    });
+    store.record({
+      id: 'feb',
+      at: Date.parse('2026-02-10T08:00:00Z'),
+      name: 'Old',
+      amount: 20,
+      currency: 'USD',
+      toman: 17000000
+    });
+    store.record({
+      id: 'dec',
+      at: Date.parse('2026-12-10T08:00:00Z'),
+      name: 'New',
+      amount: 5,
+      currency: 'USD',
+      toman: 5000000
+    });
     store.flush();
     store.rollup(true);
     const months = fs.readdirSync(store.rollupDir).sort();
@@ -714,14 +813,28 @@ test('the donor index survives a rollup, so "returning donor" stays correct on o
   const clock = { now: Date.parse('2026-12-15T12:00:00Z') };
   const { dir, store } = tempStore({ now: () => clock.now });
   try {
-    store.record({ id: 'old', at: Date.parse('2026-01-10T08:00:00Z'), name: 'Loyal', amount: 10, currency: 'USD', toman: 8000000 });
+    store.record({
+      id: 'old',
+      at: Date.parse('2026-01-10T08:00:00Z'),
+      name: 'Loyal',
+      amount: 10,
+      currency: 'USD',
+      toman: 8000000
+    });
     store.flush();
     store.load();
     store.rollup(true); // details dropped, but the index was written alongside
     assert.ok(fs.existsSync(store.donorFile));
     assert.equal(store.donors().get('Loyal'), Date.parse('2026-01-10T08:00:00Z'));
     // a December donation from the same person must read as a returning donor
-    store.record({ id: 'new', at: Date.parse('2026-12-10T08:00:00Z'), name: 'Loyal', amount: 5, currency: 'USD', toman: 5000000 });
+    store.record({
+      id: 'new',
+      at: Date.parse('2026-12-10T08:00:00Z'),
+      name: 'Loyal',
+      amount: 5,
+      currency: 'USD',
+      toman: 5000000
+    });
     store.flush();
     const data = store.load();
     const firstSeen = new Map(store.donors());
@@ -766,8 +879,22 @@ test('a range that reaches into rolled-up months says so instead of looking comp
   const { dir, store } = tempStore({ now: () => clock.now });
   try {
     // January detail is rolled up; December stays detailed. A season-long range spans both.
-    store.record({ id: 'jan', at: Date.parse('2026-01-10T08:00:00Z'), name: 'Old', amount: 100, currency: 'USD', toman: 80000000 });
-    store.record({ id: 'dec', at: Date.parse('2026-12-10T08:00:00Z'), name: 'New', amount: 5, currency: 'USD', toman: 5000000 });
+    store.record({
+      id: 'jan',
+      at: Date.parse('2026-01-10T08:00:00Z'),
+      name: 'Old',
+      amount: 100,
+      currency: 'USD',
+      toman: 80000000
+    });
+    store.record({
+      id: 'dec',
+      at: Date.parse('2026-12-10T08:00:00Z'),
+      name: 'New',
+      amount: 5,
+      currency: 'USD',
+      toman: 5000000
+    });
     store.flush();
     store.rollup(true);
     const data = store.load();
@@ -797,8 +924,23 @@ test('a rollup does not turn a test tip into a real donation in the monthly summ
   const clock = { now: Date.parse('2026-12-15T12:00:00Z') };
   const { dir, store } = tempStore({ now: () => clock.now });
   try {
-    store.record({ id: 'real', at: Date.parse('2026-01-10T08:00:00Z'), name: 'Ali', amount: 10, currency: 'USD', toman: 8000000 });
-    store.record({ id: 't1', at: Date.parse('2026-01-11T08:00:00Z'), name: 'تستی', amount: 999, currency: 'USD', toman: 999000000, test: true });
+    store.record({
+      id: 'real',
+      at: Date.parse('2026-01-10T08:00:00Z'),
+      name: 'Ali',
+      amount: 10,
+      currency: 'USD',
+      toman: 8000000
+    });
+    store.record({
+      id: 't1',
+      at: Date.parse('2026-01-11T08:00:00Z'),
+      name: 'تستی',
+      amount: 999,
+      currency: 'USD',
+      toman: 999000000,
+      test: true
+    });
     store.flush();
     store.rollup(true);
     const jan = store.load().months.find(m => m.month === '2026-01');
@@ -817,7 +959,14 @@ test('a stored record is dated by its `at` field, not read as undated', () => {
   // existed. This pins the field the store actually writes.
   const { dir, store } = tempStore();
   try {
-    store.record({ id: 'stored', at: Date.parse('2026-09-24T08:00:00Z'), name: 'Ali', amount: 10, currency: 'USD', toman: 10000000 });
+    store.record({
+      id: 'stored',
+      at: Date.parse('2026-09-24T08:00:00Z'),
+      name: 'Ali',
+      amount: 10,
+      currency: 'USD',
+      toman: 10000000
+    });
     store.flush();
     const [item] = store.load().items;
     assert.equal(item.at, Date.parse('2026-09-24T08:00:00Z'), 'the store persists the instant under `at`');
@@ -834,8 +983,23 @@ test('a stored record is dated by its `at` field, not read as undated', () => {
 test('a test tip is stored as a test and never counted as a real donation', () => {
   const { dir, store } = tempStore();
   try {
-    store.record({ id: 'real', at: Date.parse('2026-09-24T08:00:00Z'), name: 'Ali', amount: 10, currency: 'USD', toman: 10000000 });
-    store.record({ id: 'test_1', at: Date.parse('2026-09-24T08:30:00Z'), name: 'تستی', amount: 999, currency: 'USD', toman: 999000000, test: true });
+    store.record({
+      id: 'real',
+      at: Date.parse('2026-09-24T08:00:00Z'),
+      name: 'Ali',
+      amount: 10,
+      currency: 'USD',
+      toman: 10000000
+    });
+    store.record({
+      id: 'test_1',
+      at: Date.parse('2026-09-24T08:30:00Z'),
+      name: 'تستی',
+      amount: 999,
+      currency: 'USD',
+      toman: 999000000,
+      test: true
+    });
     store.flush();
     const data = store.load();
     assert.equal(data.items.find(i => i.id === 'test_1').test, true, 'the flag survives the round trip to disk');
@@ -844,7 +1008,13 @@ test('a test tip is stored as a test and never counted as a real donation', () =
     assert.equal(r.totals.amountUsd, 10);
     assert.equal(r.excluded.test, 1);
     // and it is still recoverable on request, so the flag is not destroying data
-    const withTests = A.computeAnalytics(data.items, { range: 'today', now: NOW, tz: TZ, rate: { value: 1000000 }, includeTests: true });
+    const withTests = A.computeAnalytics(data.items, {
+      range: 'today',
+      now: NOW,
+      tz: TZ,
+      rate: { value: 1000000 },
+      includeTests: true
+    });
     assert.equal(withTests.totals.count, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -854,8 +1024,22 @@ test('a test tip is stored as a test and never counted as a real donation', () =
 test('clearing the app data removes every file the analytics store owns', () => {
   const { dir, store } = tempStore();
   try {
-    store.record({ id: 'a', at: Date.parse('2026-01-10T08:00:00Z'), name: 'A', amount: 5, currency: 'USD', toman: 4000000 });
-    store.record({ id: 'b', at: Date.parse('2026-12-10T08:00:00Z'), name: 'B', amount: 5, currency: 'USD', toman: 5000000 });
+    store.record({
+      id: 'a',
+      at: Date.parse('2026-01-10T08:00:00Z'),
+      name: 'A',
+      amount: 5,
+      currency: 'USD',
+      toman: 4000000
+    });
+    store.record({
+      id: 'b',
+      at: Date.parse('2026-12-10T08:00:00Z'),
+      name: 'B',
+      amount: 5,
+      currency: 'USD',
+      toman: 5000000
+    });
     store.flush();
     store.load();
     store.rollup(true);
@@ -937,7 +1121,15 @@ test('/api/analytics serves the stored history, honours range and tz, and hides 
     source: 'kickbot',
     played: true
   });
-  srv.analytics.record({ id: 'pi_2', at: Date.now() - 1000, name: 'Ali', amount: 5, currency: 'USD', toman: 5000000, rate: 1000000 });
+  srv.analytics.record({
+    id: 'pi_2',
+    at: Date.now() - 1000,
+    name: 'Ali',
+    amount: 5,
+    currency: 'USD',
+    toman: 5000000,
+    rate: 1000000
+  });
   const today = JSON.parse((await get('/api/analytics?range=today')).body);
   assert.equal(today.totals.count, 2);
   assert.equal(today.totals.uniqueDonors, 1);
@@ -964,7 +1156,9 @@ test('/api/analytics serves the stored history, honours range and tz, and hides 
 
   // the endpoint is read-only: a mutating method must not be accepted
   const posted = await new Promise(resolve => {
-    const r = http.request({ host: '127.0.0.1', port, path: '/api/analytics', method: 'POST' }, res => resolve(res.statusCode));
+    const r = http.request({ host: '127.0.0.1', port, path: '/api/analytics', method: 'POST' }, res =>
+      resolve(res.statusCode)
+    );
     r.end();
   });
   assert.equal(posted, 404);

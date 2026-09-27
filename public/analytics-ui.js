@@ -20,7 +20,8 @@
   const axisTz = () => (LAST && LAST.range ? LAST.range.tzOffsetMin : -new Date().getTimezoneOffset());
   const localDate = ms => new Date(ms + axisTz() * 60000);
 
-  const usd = n => (isNum(n) ? '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—');
+  const usd = n =>
+    isNum(n) ? '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
   /** Compact USD for axis ticks: $1.2k / $12k / $1.2M. */
   function usdShort(n) {
     if (!isNum(n)) return '';
@@ -173,7 +174,13 @@
         subFa: true,
         delta: delta(t.amountToman, prev && prev.amountToman, 'نسبت به دوره‌ی قبل')
       },
-      { icon: 'i-queue', lbl: 'تعداد دونیت', big: faNum(t.count), sub: '', delta: delta(t.count, prev && prev.count, 'نسبت به دوره‌ی قبل') },
+      {
+        icon: 'i-queue',
+        lbl: 'تعداد دونیت',
+        big: faNum(t.count),
+        sub: '',
+        delta: delta(t.count, prev && prev.count, 'نسبت به دوره‌ی قبل')
+      },
       {
         icon: 'i-pulse',
         lbl: 'میانگین',
@@ -535,7 +542,10 @@
       }
 
       const heat = heatmap(d);
-      if (heat) blocks.push(`<div class="card" style="margin-top:14px"><h3><svg><use href="#i-pulse"/></svg>نقشه‌ی فعالیت<span class="tail">روز هفته × ساعت</span></h3>${heat}</div>`);
+      if (heat)
+        blocks.push(
+          `<div class="card" style="margin-top:14px"><h3><svg><use href="#i-pulse"/></svg>نقشه‌ی فعالیت<span class="tail">روز هفته × ساعت</span></h3>${heat}</div>`
+        );
     }
 
     const notes = notesBlock(d);
