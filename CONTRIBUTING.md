@@ -53,6 +53,9 @@ JavaScript is formatted with [Prettier](https://prettier.io) (settings in `.pret
 3. `npm test` must pass. If you touch `server.js` validation or the overlay renderer, add a test.
 4. Do not change the security defaults (`contextIsolation`, `sandbox`, fuses, Host/Origin checks, CSP) without explaining the threat model.
 5. Do not add analytics, telemetry, crash reporting, auto-update or any new network destination without a discussion; [PRIVACY.md](PRIVACY.md) and [docs/DATA_FLOW.md](docs/DATA_FLOW.md) must be updated in the same PR when network behaviour changes.
+6. CHANGELOG: put your entry under `## Unreleased`; the maintainer assigns the version number.
+7. Tests must run without network access: never call KickBot, Kick, StreamElements or any other real service from a test (use `testHooks`).
+8. New data stored in `Documents\Sahne Plus` needs the same treatment as a new network destination: describe it in PRIVACY.md (and its copy `public/legal/PRIVACY.md`) and docs/DATA_FLOW.md in the same PR.
 
 ## Licensing of contributions
 

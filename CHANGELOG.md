@@ -2,6 +2,13 @@
 
 All notable changes to the public builds. Versions follow semantic versioning.
 
+## 1.3.7 — 2026-09-28
+
+- Fixed: a KickBot donation whose payment was captured while the last Browser Source closed (OBS closed, the source refreshed, or hidden with "Shutdown source when not visible") was marked as played but shown to nobody, and never came back. It now goes back to the front of the queue, is not marked as played, and plays once a Browser Source connects, without a second capture request (thanks [SoroushRF](https://github.com/SoroushRF), [#8](https://github.com/AmirEyZed/sahne-plus/pull/8)).
+- Fixed: the in-app update could stay on «در حال دانلود» until the app was restarted when the connection stalled or the file could not be written (full disk, a file locked by an antivirus). A download that makes no progress for 60 seconds now stops, a write error stops it at once with its own message, the partial file is deleted, and «آپدیت» can be clicked again; a slow download that keeps moving is never cut off (thanks [SoroushRF](https://github.com/SoroushRF), [#9](https://github.com/AmirEyZed/sahne-plus/pull/9)). The update to 1.3.7 itself still runs through the previous version's updater, so this helps from the next update on.
+- Changed: disconnecting KickBot also removes KickBot's own dashboard test tips from the queue; Kick subs, StreamElements tips and the app's own test alerts stay queued (thanks [SoroushRF](https://github.com/SoroushRF), [#7](https://github.com/AmirEyZed/sahne-plus/pull/7)).
+- Project: CONTRIBUTING.md asks for CHANGELOG entries under "Unreleased", tests that run without network access, and a PRIVACY.md / DATA_FLOW.md update for new data stored on the computer.
+
 ## 1.3.6 — 2026-09-26
 
 - Fixed: disconnecting KickBot also removed the Kick subscription / gift-sub alerts and StreamElements tips that were waiting in the queue (for example while no Browser Source was open). Only KickBot's own donations are removed now (thanks [SoroushRF](https://github.com/SoroushRF), [#4](https://github.com/AmirEyZed/sahne-plus/pull/4)).
