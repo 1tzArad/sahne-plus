@@ -171,8 +171,9 @@ test('weekly aggregation covers the Iranian week (Saturday onwards) with daily p
   assert.equal(r.range.granularity, 'day');
   assert.equal(A.dateKey(r.range.startMs, TZ), '2026-09-19');
   // Mon–Thu of this week: d1..d4. The 18th is the Friday before the week opens, so d5 is excluded.
+  // d4 is a Kick gift, so it is excluded from USD totals (synthetic USD amount).
   assert.equal(r.totals.count, 4);
-  assert.equal(r.totals.amountUsd, 65);
+  assert.equal(r.totals.amountUsd, 60);
   assert.equal(r.series.points.length, 6, 'Sat 19 … Thu 24');
 });
 
@@ -194,10 +195,12 @@ test('custom range includes both end days and picks a granularity from its lengt
   assert.equal(A.granularityFor(1 * 86400000), 'hour', 'a day or two stays hourly');
   assert.equal(A.granularityFor(200 * 86400000), 'week');
   assert.equal(A.granularityFor(900 * 86400000), 'month');
-  // a reversed pair collapses instead of producing an empty or inverted range
-  const reversed = run(spread, { range: 'custom', from: '2026-09-24', to: '2026-09-18' });
-  assert.ok(reversed.range.endMs > reversed.range.startMs);
-  assert.equal(reversed.totals.count, 2, 'the from-day alone');
+  // a reversed pair is rejected with a clear error (the HTTP layer turns it into a 400)
+  assert.throws(() => run(spread, { range: 'custom', from: '2026-09-24', to: '2026-09-18' }), /from_after_to/);
+  // malformed and out-of-range dates are rejected too, never silently becoming "today"
+  assert.throws(() => run(spread, { range: 'custom', from: 'nonsense', to: '2026-09-18' }), /invalid_from/);
+  assert.throws(() => run(spread, { range: 'custom', from: '2019-01-01', to: '2026-09-18' }), /out_of_range_from/);
+  assert.throws(() => run(spread, { range: 'custom', from: '2026-09-18', to: '2099-01-01' }), /out_of_range_to/);
 });
 
 test('a long custom range coarsens instead of exploding into thousands of buckets', () => {
@@ -514,7 +517,8 @@ test('the source and kind breakdowns only ever contain values the app can actual
   assert.deepEqual(kinds, ['gift', 'sub', 'tip']);
   const kick = r.breakdown.bySource.find(s => s.key === 'kick');
   assert.equal(kick.count, 2);
-  assert.equal(kick.amountUsd, 9);
+  // Kick subs/gifts carry a synthetic USD amount derived from toman, so they are excluded from USD totals
+  assert.equal(kick.amountUsd, 0);
   assert.equal(kick.amountToman, 9000000);
   // an unknown provider is folded into "other" rather than passed through
   const odd = run([{ id: 'z', ts: '2026-09-24T08:00:00Z', name: 'Z', amount: 1, currency: 'USD', source: '../evil' }], {
@@ -1283,4 +1287,519 @@ test('analytics helpers are pure and exported for the server and the tests', () 
   const before = JSON.stringify(items);
   run(items);
   assert.equal(JSON.stringify(items), before);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Regression tests for review fixes
+// ---------------------------------------------------------------------------------------------
+
+test('rollup merges with an existing monthly summary instead of overwriting it', () => {
+  const clock = { now: Date.parse('2026-12-15T12:00:00Z') };
+  const { dir, store } = tempStore({ now: () => clock.now });
+  try {
+    // First rollup: January gets summarized
+    store.record({
+      id: 'jan1',
+      at: Date.parse('2026-01-10T08:00:00Z'),
+      name: 'Old',
+      amount: 10,
+      currency: 'USD',
+      toman: 8000000
+    });
+    store.flush();
+    store.rollup(true);
+    let jan = store.load().months.find(m => m.month === '2026-01');
+    assert.equal(jan.count, 1);
+    assert.equal(jan.usd, 10);
+
+    // A late-arriving donation for January (KickBot replay of an old tip)
+    store.record({
+      id: 'jan2',
+      at: Date.parse('2026-01-15T08:00:00Z'),
+      name: 'New',
+      amount: 20,
+      currency: 'USD',
+      toman: 17000000
+    });
+    store.flush();
+    store.rollup(true);
+    jan = store.load().months.find(m => m.month === '2026-01');
+    assert.equal(jan.count, 2, 'the late donation is merged into the existing summary');
+    assert.equal(jan.usd, 30, 'totals are the sum of both donations');
+    assert.equal(jan.toman, 25000000);
+    assert.equal(jan.donors, 2, 'both donors are counted');
+    assert.equal(jan.days['2026-01-10'].count, 1);
+    assert.equal(jan.days['2026-01-15'].count, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a future month is never rolled up or deleted', () => {
+  const clock = { now: Date.parse('2026-09-24T18:00:00Z') };
+  const { dir, store } = tempStore({ now: () => clock.now });
+  try {
+    // A donation with a future created_at (or a clock rollback)
+    store.record({
+      id: 'future',
+      at: Date.parse('2027-03-10T08:00:00Z'),
+      name: 'Future',
+      amount: 10,
+      currency: 'USD',
+      toman: 8000000
+    });
+    store.flush();
+    store.rollup(true);
+    // The future month file must still exist as detail data
+    assert.ok(fs.existsSync(path.join(dir, 'analytics-2027-03.ndjson')), 'the future month is not rolled up');
+    assert.ok(!fs.existsSync(store.rollupDir), 'no rollup directory was created at all');
+    const data = store.load();
+    assert.equal(data.items.length, 1, 'the future donation is still readable as detail');
+    assert.equal(data.coverage.rolledMonths, 0, 'nothing is summarised');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('replay records with the same id are deduplicated during rollup', () => {
+  const clock = { now: Date.parse('2026-12-15T12:00:00Z') };
+  const { dir, store } = tempStore({ now: () => clock.now });
+  try {
+    // The same donation recorded twice (KickBot replay)
+    store.record({
+      id: 'replay',
+      at: Date.parse('2026-01-10T08:00:00Z'),
+      name: 'Ali',
+      amount: 10,
+      currency: 'USD',
+      toman: 8000000
+    });
+    store.record({
+      id: 'replay',
+      at: Date.parse('2026-01-10T08:00:00Z'),
+      name: 'Ali',
+      amount: 10,
+      currency: 'USD',
+      toman: 8000000
+    });
+    store.flush();
+    store.rollup(true);
+    const jan = store.load().months.find(m => m.month === '2026-01');
+    assert.equal(jan.count, 1, 'the replay is counted once, not twice');
+    assert.equal(jan.usd, 10);
+    assert.equal(jan.toman, 8000000);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a torn final NDJSON line is repaired before the next append', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.record({ id: 'a', at: Date.parse('2026-09-24T08:00:00Z'), name: 'A', amount: 5, currency: 'USD' });
+    store.flush();
+    // Simulate a power loss mid-write: the file ends without a newline
+    const file = path.join(dir, 'analytics-2026-09.ndjson');
+    fs.appendFileSync(file, '{"id":"b","at":123,"name":"trunc');
+    // The next record must not be concatenated onto the torn line
+    store.record({ id: 'c', at: Date.parse('2026-09-24T09:00:00Z'), name: 'C', amount: 7, currency: 'USD' });
+    store.flush();
+    const lines = fs.readFileSync(file, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 3, 'the torn line is separated from the new record');
+    assert.equal(JSON.parse(lines[0]).id, 'a');
+    assert.equal(JSON.parse(lines[2]).id, 'c', 'the new record is on its own line');
+    const data = store.load();
+    assert.equal(data.items.length, 2, 'both valid records are readable');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('previousRange shifts by the full length of a custom range', () => {
+  // A 7-day custom range: the previous period must be the 7 days before it, not 1 day before
+  const range = A.resolveRange('custom', { now: NOW, tz: TZ, from: '2026-09-18', to: '2026-09-24' });
+  const prev = A.previousRange(range, TZ);
+  const span = range.end - range.start;
+  assert.equal(prev.end - prev.start, span, 'the previous period has the same length');
+  assert.equal(prev.end, range.start, 'the previous period ends exactly when the current one starts');
+  assert.equal(A.dateKey(prev.start, TZ), '2026-09-11', '7 days before the 18th is the 11th');
+  assert.equal(A.dateKey(prev.end - 1, TZ), '2026-09-17', 'the day before the 18th is the 17th');
+});
+
+test('the previous period of "this month" never enters the current month', () => {
+  // Esfand (the 12th Persian month) is 29 or 30 days, so a naive shift back by the elapsed span can reach past the
+  // start of the current month. The comparison must never overlap the period it is compared against.
+  for (const iso of [
+    '2026-03-18T12:00:00Z', // 1404/12/28 — deep into Esfand
+    '2026-03-19T12:00:00Z', // 1404/12/29 — Esfand 29
+    '2026-03-20T12:00:00Z', // 1404/12/30 — Esfand 30
+    '2026-03-21T12:00:00Z', // the 1st of Farvardin, the month boundary itself
+    '2026-09-24T18:00:00Z' // the 2nd of Mehr
+  ]) {
+    const range = A.resolveRange('month', { now: Date.parse(iso), tz: TZ });
+    const prev = A.previousRange(range, TZ);
+    assert.ok(prev.end <= range.start, `${iso}: the previous period ends at or before the month starts`);
+    assert.equal(
+      A.jalaliMonthKey(prev.start, TZ),
+      A.jalaliMonthKey(prev.end - 1, TZ),
+      `${iso}: the whole previous period stays inside the previous Persian month`
+    );
+    assert.ok(prev.start < prev.end, `${iso}: the previous period is not empty`);
+  }
+  // 1 Mehr: the previous period is Esfand, whatever its length
+  const mehr = A.resolveRange('month', { now: Date.parse('2026-09-24T18:00:00Z'), tz: TZ });
+  assert.equal(A.jalaliMonthKey(mehr.start, TZ), '1405-07');
+  const mehrPrev = A.previousRange(mehr, TZ);
+  assert.equal(A.jalaliMonthKey(mehrPrev.start, TZ), '1405-06');
+  assert.ok(mehrPrev.end <= mehr.start);
+  // late Farvardin: the previous period is Bahman and stops at the Farvardin boundary
+  const farvardin = A.resolveRange('month', { now: Date.parse('2026-03-20T12:00:00Z'), tz: TZ });
+  assert.equal(A.jalaliMonthKey(farvardin.start, TZ), '1404-12');
+  const farvardinPrev = A.previousRange(farvardin, TZ);
+  assert.equal(A.jalaliMonthKey(farvardinPrev.start, TZ), '1404-11');
+  assert.ok(farvardinPrev.end <= farvardin.start, 'the previous period does not reach into Esfand');
+});
+
+test('busiest hour 0 (midnight) is reported correctly', () => {
+  // 20:30Z and 21:00Z are 00:00 and 00:30 in Tehran (+03:30); 20:00Z is still 23:30 the day before.
+  const items = [
+    { id: 'a', ts: '2026-09-24T20:00:00Z', name: 'A', amount: 5, currency: 'USD', toman: 5000000 },
+    { id: 'b', ts: '2026-09-24T20:30:00Z', name: 'B', amount: 5, currency: 'USD', toman: 5000000 },
+    { id: 'c', ts: '2026-09-24T21:00:00Z', name: 'C', amount: 5, currency: 'USD', toman: 5000000 }
+  ];
+  // a custom range is needed: 20:30Z is already "tomorrow" locally
+  const r = run(items, { range: 'custom', from: '2026-09-25', to: '2026-09-25' });
+  assert.equal(r.totals.count, 2, 'only the two local-midnight donations are in the 25th');
+  assert.equal(r.activity.busiestHour.hour, 0, 'midnight is a valid busiest hour');
+  assert.equal(r.activity.busiestHour.count, 2);
+  // hour 0 must also win on its own: the old `!busiestHour` check could never select it
+  const onlyMidnight = run([items[1]], { range: 'custom', from: '2026-09-25', to: '2026-09-25' });
+  assert.equal(onlyMidnight.activity.busiestHour.hour, 0);
+  assert.equal(onlyMidnight.activity.busiestHour.count, 1);
+  // and a non-zero hour still wins normally
+  const evening = run(
+    [{ id: 'd', ts: '2026-09-24T08:00:00Z', name: 'D', amount: 5, currency: 'USD', toman: 5000000 }],
+    {
+      range: 'today'
+    }
+  );
+  assert.equal(evening.activity.busiestHour.hour, 11);
+});
+
+test('donor names are normalized for grouping and anonymous donors are excluded from donor metrics', () => {
+  const items = [
+    { id: 'a', ts: '2026-09-24T08:00:00Z', name: 'علی', amount: 10, currency: 'USD', toman: 10000000 },
+    { id: 'b', ts: '2026-09-24T09:00:00Z', name: 'علي', amount: 20, currency: 'USD', toman: 20000000 }, // Arabic ي
+    { id: 'c', ts: '2026-09-24T10:00:00Z', name: 'Ali', amount: 30, currency: 'USD', toman: 30000000 },
+    { id: 'd', ts: '2026-09-24T11:00:00Z', name: 'ali', amount: 40, currency: 'USD', toman: 40000000 },
+    { id: 'e', ts: '2026-09-24T12:00:00Z', name: 'Ali ', amount: 50, currency: 'USD', toman: 50000000 }, // trailing space
+    { id: 'f', ts: '2026-09-24T13:00:00Z', name: '  Ali  ', amount: 60, currency: 'USD', toman: 60000000 },
+    { id: 'g', ts: '2026-09-24T14:00:00Z', name: 'ناشناس', amount: 100, currency: 'USD', toman: 100000000 },
+    { id: 'h', ts: '2026-09-24T15:00:00Z', name: '   ', amount: 200, currency: 'USD', toman: 200000000 }
+  ];
+  const r = run(items, { range: 'today' });
+  // علی/علي is one donor, the Latin variants are another: the normalized key never merges two different scripts
+  assert.equal(r.totals.uniqueDonors, 2, 'one donor per normalized name');
+  assert.equal(r.totals.count, 8, 'every donation is still counted');
+  assert.equal(r.totals.amountToman, 510000000, 'the Toman total still includes anonymous donations');
+  assert.equal(r.totals.amountUsd, 510, 'the USD total still includes anonymous donations');
+  // Anonymous donations must not turn into the #1 donor
+  assert.notEqual(r.totals.largestDonor, 'ناشناس', 'an anonymous donation is never reported as "largest donor"');
+  assert.equal(r.topDonors.length, 2, 'anonymous donors are not in the top-donor list');
+  assert.ok(
+    r.topDonors.every(d => d.name !== 'ناشناس'),
+    'no anonymous entry in the top-donor list'
+  );
+  // Same script + case/whitespace variants do collapse into one
+  assert.equal(r.topDonors[0].count, 4, 'Ali / ali / "Ali " / "  Ali  " are one donor');
+  assert.equal(r.topDonors[1].count, 2, 'علی and علي are one donor');
+  // Repeat/new/returning are computed over the named donors only
+  assert.equal(r.totals.repeatDonors, 2);
+  assert.equal(r.totals.newDonors, 2, 'both named donors first appear in this range');
+  assert.equal(r.totals.returningDonors, 0);
+  // Repeated whitespace is collapsed to a single space in the key
+  assert.equal(A.normalizeDonorKey('Ali  \t Reza '), 'ali reza');
+  assert.equal(A.normalizeDonorKey('علي'), A.normalizeDonorKey('علی'), 'Arabic ي normalizes to Persian ی');
+  assert.equal(A.normalizeDonorKey('ك'), A.normalizeDonorKey('ک'), 'Arabic ك normalizes to Persian ک');
+  assert.equal(A.normalizeDonorKey('Ali'), A.normalizeDonorKey('ali'), 'Latin case is normalized');
+  assert.equal(A.normalizeDonorKey('Ali '), A.normalizeDonorKey('Ali'), 'trailing whitespace is trimmed');
+  assert.notEqual(A.normalizeDonorKey('علی'), A.normalizeDonorKey('ali'), 'different scripts stay different donors');
+  assert.equal(A.isAnonymousDonor(''), true);
+  assert.equal(A.isAnonymousDonor('   '), true);
+  assert.equal(A.isAnonymousDonor('ناشناس'), true);
+  assert.equal(A.isAnonymousDonor('Ali'), false);
+  // an anonymous donor never becomes a repeat or returning donor
+  const anon = run(
+    [0, 1, 2].map(i => ({
+      id: 'anon' + i,
+      ts: `2026-09-24T${String(8 + i).padStart(2, '0')}:00:00Z`,
+      name: i === 0 ? '' : 'ناشناس',
+      amount: 5,
+      currency: 'USD',
+      toman: 5000000
+    })),
+    { range: 'today' }
+  );
+  assert.equal(anon.totals.uniqueDonors, 0, 'anonymous donations produce no unique donor');
+  assert.equal(anon.totals.repeatDonors, 0, 'they are not repeat donors');
+  assert.equal(anon.totals.returningDonors, 0, 'they are not returning donors');
+  assert.equal(anon.totals.count, 3, 'but they are still real donations in the totals');
+  assert.deepEqual(anon.totals.topShare, { top1: 0, top5: 0, top10: 0 }, 'no named donor holds any share');
+  assert.equal(anon.totals.largestDonor, null, 'and none is credited as the largest donor');
+});
+
+test('returning donor calculations work with normalized donor keys', () => {
+  // Ali's first donation is before the range, Sara's is inside it. "Ali" and "ali" are one donor.
+  const items = [
+    { id: 'a0', ts: '2026-09-10T08:00:00Z', name: 'Ali', amount: 5, currency: 'USD', toman: 5000000 },
+    { id: 'a1', ts: '2026-09-20T08:00:00Z', name: 'Ali', amount: 10, currency: 'USD', toman: 10000000 },
+    { id: 'a2', ts: '2026-09-24T08:00:00Z', name: 'ali', amount: 10, currency: 'USD', toman: 10000000 },
+    { id: 's1', ts: '2026-09-24T09:00:00Z', name: 'Sara', amount: 100, currency: 'USD', toman: 100000000 }
+  ];
+  const r = run(items, { range: 'custom', from: '2026-09-20', to: '2026-09-24' });
+  assert.equal(r.totals.count, 3, 'the pre-range donation is not counted in the period');
+  assert.equal(r.totals.uniqueDonors, 2, 'Ali and Sara are two donors');
+  assert.equal(r.totals.repeatDonors, 1, 'Ali donated twice in the period under two spellings');
+  assert.equal(r.totals.newDonors, 1, 'only Sara first appears in this range');
+  assert.equal(
+    r.totals.returningDonors,
+    1,
+    'Ali is a returning donor, because his first donation is older than the range'
+  );
+  // An externally supplied index (as the store provides after a rollup) is normalized the same way, so "Ali"/"ali"
+  // stay one donor even when the index only ever saw one spelling.
+  const fromStore = new Map([
+    ['Ali', Date.parse('2026-09-10T08:00:00Z')],
+    ['Sara', Date.parse('2026-09-24T09:00:00Z')]
+  ]);
+  const withIndex = A.computeAnalytics(items, {
+    range: 'custom',
+    from: '2026-09-20',
+    to: '2026-09-24',
+    now: NOW,
+    tz: TZ,
+    rate: { value: 1000000 },
+    donorFirstSeen: fromStore
+  });
+  assert.equal(withIndex.totals.newDonors, 1, 'only Sara is new; Ali is already in the index under one spelling');
+  assert.equal(withIndex.totals.returningDonors, 1, 'Ali counts as returning despite the spelling change');
+  assert.equal(withIndex.totals.uniqueDonors, 2);
+});
+
+test('Kick subscriptions are excluded from USD monetary metrics but counted in totals', () => {
+  const items = [
+    {
+      id: 'tip',
+      ts: '2026-09-24T08:00:00Z',
+      name: 'A',
+      amount: 10,
+      currency: 'USD',
+      toman: 10000000,
+      kind: 'tip',
+      source: 'kickbot'
+    },
+    {
+      id: 'sub',
+      ts: '2026-09-24T09:00:00Z',
+      name: 'B',
+      amount: 4.99,
+      currency: 'USD',
+      toman: 4990000,
+      kind: 'sub',
+      source: 'kick'
+    },
+    {
+      id: 'gift',
+      ts: '2026-09-24T10:00:00Z',
+      name: 'C',
+      amount: 9.98,
+      currency: 'USD',
+      toman: 9980000,
+      kind: 'gift',
+      source: 'kick'
+    }
+  ];
+  const r = run(items, { range: 'today' });
+  assert.equal(r.totals.count, 3, 'all events are counted');
+  assert.equal(r.totals.amountUsd, 10, 'only the real USD tip is in the USD total');
+  assert.equal(r.totals.usdCount, 1, 'only one USD donation');
+  assert.equal(r.totals.avgUsd, 10, 'average is over real USD donations only');
+  assert.equal(r.totals.medianUsd, 10, 'median is over real USD donations only');
+  assert.equal(r.totals.amountToman, 24970000, 'toman totals include all events');
+  assert.equal(r.totals.convertedCount, 3, 'all events have toman values');
+  // The distribution only includes real USD donations
+  assert.equal(
+    r.distribution.reduce((a, b) => a + b.count, 0),
+    1,
+    'only the tip is in the distribution'
+  );
+});
+
+test('record() rejects timestamps outside a sane range', () => {
+  const { dir, store } = tempStore();
+  try {
+    // A far-future / far-past created_at must never create a file like "analytics-10000-0.ndjson"
+    assert.equal(
+      store.record({ id: 'future', at: Date.parse('2099-01-01T00:00:00Z'), name: 'A', amount: 5, currency: 'USD' }),
+      false
+    );
+    assert.equal(store.record({ id: 'future2', at: 99999999999999, name: 'A', amount: 5, currency: 'USD' }), false);
+    assert.equal(
+      store.record({ id: 'past', at: Date.parse('2010-01-01T00:00:00Z'), name: 'A', amount: 5, currency: 'USD' }),
+      false
+    );
+    // A sane timestamp is accepted
+    assert.equal(
+      store.record({ id: 'ok', at: Date.parse('2026-09-24T08:00:00Z'), name: 'A', amount: 5, currency: 'USD' }),
+      true
+    );
+    store.flush();
+    const files = fs.readdirSync(dir).filter(f => f.startsWith('analytics-'));
+    assert.deepEqual(files, ['analytics-2026-09.ndjson'], 'no unreadable file was created for an invalid timestamp');
+    assert.equal(store.load().items.length, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('clear() prevents writes from pending timers, and resume() re-arms the store', async () => {
+  const { dir, store } = tempStore();
+  try {
+    // a record is still in the debounce window when the user clears the data
+    store.record({ id: 'pending', at: Date.parse('2026-09-24T08:00:00Z'), name: 'A', amount: 5, currency: 'USD' });
+    store.clear();
+    await sleep(600); // longer than the 400 ms debounce: the timer must not have written anything
+    assert.equal(
+      fs.readdirSync(dir).filter(f => f.startsWith('analytics-') && f.endsWith('.ndjson')).length,
+      0,
+      'a pending flush must not write a month file after clear()'
+    );
+    assert.equal(
+      store.record({ id: 'b', at: Date.parse('2026-09-24T09:00:00Z'), name: 'B', amount: 5, currency: 'USD' }),
+      false
+    );
+    assert.equal(store.markOutcome('pending', false), false, 'markOutcome is a no-op once the store is stopped');
+    store.flush();
+    assert.equal(store.rollup(true), undefined);
+    assert.equal(
+      fs.readdirSync(dir).filter(f => f.startsWith('analytics-') && f.endsWith('.ndjson')).length,
+      0,
+      'still nothing on disk after clear()'
+    );
+    // the application lifecycle reinitialises the store after a clear
+    store.resume(true);
+    assert.equal(
+      store.record({ id: 'c', at: Date.parse('2026-09-24T10:00:00Z'), name: 'C', amount: 5, currency: 'USD' }),
+      true
+    );
+    store.flush();
+    const data = store.load();
+    assert.equal(data.items.length, 1, 'the store works again after resume()');
+    assert.equal(data.items[0].id, 'c');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('with the recording switch off the store writes nothing: no rollup, no donor index, no history', () => {
+  const clock = { now: Date.parse('2026-12-15T12:00:00Z') };
+  const { dir, store } = tempStore({ now: () => clock.now });
+  try {
+    // history exists from an earlier run
+    store.record({
+      id: 'old',
+      at: Date.parse('2026-01-10T08:00:00Z'),
+      name: 'Old',
+      amount: 10,
+      currency: 'USD',
+      toman: 8000000
+    });
+    store.record({
+      id: 'dec',
+      at: Date.parse('2026-12-10T08:00:00Z'),
+      name: 'New',
+      amount: 5,
+      currency: 'USD',
+      toman: 5000000
+    });
+    store.flush();
+    store.load();
+    const before = fs.readdirSync(dir).sort().join(',');
+
+    store.setRecordingEnabled(false);
+    assert.equal(
+      store.record({ id: 'off', at: Date.parse('2026-12-11T08:00:00Z'), name: 'Off', amount: 5, currency: 'USD' }),
+      false
+    );
+    store.flush();
+    store.rollup(true); // the shutdown path runs this; it must not write
+    store.load(); // opening the page reads and would save the donor index
+    store.rollup(true);
+    const after = fs.readdirSync(dir).sort().join(',');
+    assert.equal(after, before, 'opening the page and shutting down changed nothing on disk');
+    assert.ok(!fs.existsSync(store.rollupDir), 'no rollup summary was written');
+    assert.equal(store.load().items.length, 2, 'the stored history is preserved, not deleted');
+    // turning the switch back on resumes recording
+    store.setRecordingEnabled(true);
+    assert.equal(
+      store.record({ id: 'on', at: Date.parse('2026-12-12T08:00:00Z'), name: 'On', amount: 5, currency: 'USD' }),
+      true
+    );
+    store.flush();
+    assert.equal(store.load().items.length, 3);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the HTTP endpoint returns 400 for invalid custom range parameters', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sahne-test-'));
+  const port = 8600 + Math.floor(Math.random() * 100);
+  fs.writeFileSync(
+    path.join(dir, 'config.json'),
+    JSON.stringify({
+      port,
+      rate: { auto: false, manual: 1000000 },
+      kick: { enabled: false },
+      app: { autostart: false }
+    })
+  );
+  const srv = createServer({
+    dataDir: dir,
+    publicDir: path.join(__dirname, '..', 'public'),
+    appVersion: 'test',
+    testHooks: { offline: true }
+  });
+  await srv.start();
+  t.after(async () => {
+    await srv.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const get = p =>
+    new Promise((resolve, reject) => {
+      http
+        .get({ host: '127.0.0.1', port, path: p }, res => {
+          let d = '';
+          res.on('data', c => (d += c));
+          res.on('end', () => resolve({ status: res.statusCode, body: d }));
+        })
+        .on('error', reject);
+    });
+
+  // Invalid from date
+  const badFrom = await get('/api/analytics?range=custom&from=nonsense&to=2026-09-24');
+  assert.equal(badFrom.status, 400, 'malformed from date is rejected');
+
+  // Out-of-range from date
+  const outOfRange = await get('/api/analytics?range=custom&from=2019-01-01&to=2026-09-24');
+  assert.equal(outOfRange.status, 400, 'out-of-range from date is rejected');
+
+  // from > to
+  const reversed = await get('/api/analytics?range=custom&from=2026-09-24&to=2026-09-18');
+  assert.equal(reversed.status, 400, 'reversed range is rejected');
+
+  // Valid range still works
+  const ok = await get('/api/analytics?range=custom&from=2026-09-18&to=2026-09-24');
+  assert.equal(ok.status, 200, 'valid range is accepted');
 });

@@ -32,6 +32,8 @@ const FILE_PREFIX = 'analytics-';
 const DONOR_FILE = 'analytics-donors.json';
 const ROLLUP_DIR = 'analytics-rollup';
 const APPEND_DEBOUNCE_MS = 400;
+const MIN_VALID_YEAR = 2020;
+const MAX_VALID_YEAR = new Date().getFullYear() + 1; // allow tomorrow's year
 
 /**
  * @param {string} dataDir  the application data directory (Documents\Sahne Plus)
@@ -48,6 +50,7 @@ function createAnalyticsStore(dataDir, opts = {}) {
   let droppedToday = 0;
   let lastRollupMonth = null;
   let donorFirstSeen = null; // Map<name, firstAt ms> — survives rollup, so "new vs returning" stays correct
+  let stopped = false; // set by clear(); prevents any further writes
 
   const monthOfDay = day => day.slice(0, 7); // "2026-09-24" -> "2026-09"
 
@@ -64,6 +67,19 @@ function createAnalyticsStore(dataDir, opts = {}) {
     return Date.UTC(+m[1], +m[2], 1) - tz * 60000; // the month field is 0-based, so +m[2] is already the next month
   }
 
+  function validateTimestamp(at) {
+    if (!Number.isFinite(at)) return false;
+    const d = new Date(at);
+    const year = d.getUTCFullYear();
+    return year >= MIN_VALID_YEAR && year <= MAX_VALID_YEAR;
+  }
+
+  function ensureDataDir() {
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+    } catch {}
+  }
+
   function ensureRollupDir() {
     try {
       fs.mkdirSync(rollupDir, { recursive: true });
@@ -76,12 +92,13 @@ function createAnalyticsStore(dataDir, opts = {}) {
    * @returns {boolean} true when the event was accepted for storage
    */
   function record(e) {
-    if (!config.writable) return false;
+    if (stopped || !config.writable || !config.recordingEnabled) return false;
     try {
       if (!e || typeof e !== 'object') return false;
       const id = String(e.id || '').trim();
       if (!id) return false;
       const at = Number.isFinite(e.at) ? e.at : dateFromAny(e.at) || now();
+      if (!validateTimestamp(at)) return false; // reject far-future/past timestamps that would create unreadable files
       const amount = Number(e.amount);
       if (!Number.isFinite(amount) || amount <= 0) return false; // zero/negative events are not donations
       const day = dateKey(at, tz);
@@ -117,6 +134,7 @@ function createAnalyticsStore(dataDir, opts = {}) {
 
   /** Update the alert outcome of an already recorded event (a tip can be skipped after it was recorded). */
   function markOutcome(id, played) {
+    if (stopped) return false;
     try {
       const key = String(id || '');
       if (!key) return false;
@@ -185,6 +203,7 @@ function createAnalyticsStore(dataDir, opts = {}) {
   }
 
   function schedule() {
+    if (stopped) return;
     if (flushTimer) return;
     flushTimer = setTimeout(() => {
       flushTimer = null;
@@ -194,6 +213,7 @@ function createAnalyticsStore(dataDir, opts = {}) {
   }
 
   function flush() {
+    if (stopped) return;
     if (!pending.length) return;
     const batch = pending;
     pending = [];
@@ -216,29 +236,48 @@ function createAnalyticsStore(dataDir, opts = {}) {
     for (const [month, recs] of byMonth) {
       const file = monthFile(month);
       try {
-        if (!fs.existsSync(file)) ensureRollupDir(); // the data dir itself is created by the server
+        if (!fs.existsSync(file)) ensureDataDir(); // the data dir is created by the server, but the store must not depend on that
+        // A power loss during an append can leave the file without its final newline. Appending directly would then
+        // concatenate the next record onto that torn line and destroy both. Terminate the previous line first.
+        let prefix = '';
+        try {
+          if (fs.existsSync(file)) {
+            const fd = fs.openSync(file, 'r');
+            try {
+              const size = fs.fstatSync(fd).size;
+              if (size > 0) {
+                const tail = Buffer.alloc(1);
+                if (fs.readSync(fd, tail, 0, 1, size - 1) === 1 && tail[0] !== 0x0a) prefix = '\n';
+              }
+            } finally {
+              fs.closeSync(fd);
+            }
+          }
+        } catch {}
         fs.appendFileSync(
           file,
-          recs
-            .map(r =>
-              JSON.stringify({
-                id: r.id,
-                at: r.at,
-                day: r.day,
-                name: r.name,
-                amount: r.amount,
-                currency: r.currency,
-                toman: r.toman,
-                rate: r.rate,
-                kind: r.kind,
-                source: r.source,
-                count: r.count,
-                tags: r.tags,
-                test: r.test,
-                played: r.played
-              })
-            )
-            .join('\n') + '\n'
+          prefix +
+            recs
+              .map(r =>
+                JSON.stringify({
+                  id: r.id,
+                  at: r.at,
+                  day: r.day,
+                  name: r.name,
+                  amount: r.amount,
+                  currency: r.currency,
+                  toman: r.toman,
+                  rate: r.rate,
+                  kind: r.kind,
+                  source: r.source,
+                  count: r.count,
+                  tags: r.tags,
+                  test: r.test,
+                  played: r.played
+                })
+              )
+              .join('\n') +
+            '\n'
         );
         // The events are on disk now, so the counts must include them even when nothing had read the history yet:
         // a cap that forgets them would let each debounce window add another full MAX_PER_DAY.
@@ -253,7 +292,7 @@ function createAnalyticsStore(dataDir, opts = {}) {
   // Reading
   // ---------------------------------------------------------------------------------------------
 
-  const config = { writable: true, written: 0, dropped: 0 };
+  const config = { writable: true, written: 0, dropped: 0, recordingEnabled: true };
   let rolledUpTo = null;
   let cache = null;
 
@@ -324,6 +363,7 @@ function createAnalyticsStore(dataDir, opts = {}) {
 
   /** First time each donor name was ever recorded. Bounded by MAX_DONORS (oldest entries are dropped last). */
   function rememberDonor(name, at) {
+    if (!config.recordingEnabled) return; // do not save donors when recording is disabled
     if (!name || !Number.isFinite(at)) return;
     const map = donors();
     const prev = map.get(name);
@@ -339,6 +379,7 @@ function createAnalyticsStore(dataDir, opts = {}) {
 
   let donorSaveT = null;
   function saveDonorsSoon() {
+    if (stopped || !config.recordingEnabled) return;
     if (donorSaveT) return;
     donorSaveT = setTimeout(() => {
       donorSaveT = null;
@@ -350,10 +391,13 @@ function createAnalyticsStore(dataDir, opts = {}) {
   /** Write the index immediately. Used after a rollup: the detail it summarised is already gone, so the index that
    *  still knows about those donors must not be sitting in a debounce window if the process exits. */
   function saveDonorsNow() {
+    if (stopped || !config.recordingEnabled) return;
     clearTimeout(donorSaveT);
     donorSaveT = null;
     try {
-      fs.writeFileSync(donorFile, JSON.stringify(Object.fromEntries(donors())));
+      const tmp = donorFile + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(donors())));
+      fs.renameSync(tmp, donorFile);
     } catch {}
   }
 
@@ -437,6 +481,10 @@ function createAnalyticsStore(dataDir, opts = {}) {
 
   /** Summarize every month older than KEEP_DETAIL_MONTHS into one JSON file, then delete its detail. */
   function rollup(force = false) {
+    if (stopped) return;
+    // PRIVACY.md: with the recording switch off nothing new is written. A rollup rewrites analytics-donors.json and
+    // the monthly summaries, so it is skipped entirely while recording is disabled. Stored history is left untouched.
+    if (!config.recordingEnabled) return;
     const currentMonth = monthOfDay(dateKey(now(), tz));
     if (!force && rolledUpTo === currentMonth) return;
     rolledUpTo = currentMonth;
@@ -450,9 +498,14 @@ function createAnalyticsStore(dataDir, opts = {}) {
       const first = Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth() - i, 1) - tz * 60000;
       keep.add(monthOfDay(dateKey(first, tz)));
     }
+    // Only roll up months strictly older than the oldest month we must keep.
+    // A future month must remain as detail data.
+    const oldestKeepMonth = Array.from(keep).sort()[0];
     for (const file of files) {
       const month = path.basename(file).slice(FILE_PREFIX.length, -'.ndjson'.length);
       if (keep.has(month)) continue;
+      // Do not roll up future months (months newer than the oldest month we keep).
+      if (month > oldestKeepMonth) continue;
       const recs = readLines(file).filter(r => r && r.id && Number.isFinite(r.at));
       if (!recs.length) {
         try {
@@ -460,23 +513,49 @@ function createAnalyticsStore(dataDir, opts = {}) {
         } catch {}
         continue;
       }
-      const days = {};
-      const donors = new Set();
-      const kinds = {};
-      const sources = {};
-      let usd = 0;
-      let toman = 0;
-      let oldest = Infinity;
-      let newest = -Infinity;
-      let tests = 0;
+      // Deduplicate by id to handle replays (same id recorded multiple times).
+      const byId = new Map();
       for (const r of recs) {
-        // A test/preview alert is stored for completeness but is not a donation, exactly as the detailed path treats
-        // it (normalizeItem marks it and the engine filters it). Counting it here would make a rolled-up month show
-        // money that the same month showed without while its detail still existed.
+        if (!byId.has(r.id)) byId.set(r.id, r);
+      }
+      const uniqueRecs = [...byId.values()];
+      // Read existing rollup if it exists to merge with it.
+      let existingSummary = null;
+      const rollupFile = path.join(rollupDir, month + '.json');
+      try {
+        if (fs.existsSync(rollupFile)) {
+          const raw = fs.readFileSync(rollupFile, 'utf8');
+          existingSummary = JSON.parse(raw);
+        }
+      } catch {}
+      const days = existingSummary && existingSummary.days ? { ...existingSummary.days } : {};
+      const donorNames = new Set(
+        existingSummary && Array.isArray(existingSummary.donorNames) ? existingSummary.donorNames : []
+      );
+      const kinds = existingSummary && existingSummary.kinds ? { ...existingSummary.kinds } : {};
+      const sources = existingSummary && existingSummary.sources ? { ...existingSummary.sources } : {};
+      let usd = existingSummary && Number.isFinite(existingSummary.usd) ? existingSummary.usd : 0;
+      let toman = existingSummary && Number.isFinite(existingSummary.toman) ? existingSummary.toman : 0;
+      let oldest =
+        existingSummary && Number.isFinite(Date.parse(existingSummary.from))
+          ? Date.parse(existingSummary.from)
+          : Infinity;
+      let newest =
+        existingSummary && Number.isFinite(Date.parse(existingSummary.to)) ? Date.parse(existingSummary.to) : -Infinity;
+      let tests = existingSummary && Number.isFinite(existingSummary.tests) ? existingSummary.tests : 0;
+      // `count` counts real donations, so it has to accumulate separately from the test tally.
+      let count = existingSummary && Number.isFinite(existingSummary.count) ? existingSummary.count : 0;
+      // Ids already summarised in a previous rollup of this month: a late line for the same donation must not be
+      // added twice. `count` is only incremented for an id that is not in here, so a merge can never double-count.
+      const seen = new Set(existingSummary && Array.isArray(existingSummary.ids) ? existingSummary.ids : []);
+      for (const r of uniqueRecs) {
+        if (seen.has(r.id)) continue; // already folded into this month's summary
+        seen.add(r.id);
         if (r.test) {
           tests++;
           continue;
         }
+        count++;
         const day = r.day || dateKey(r.at, tz);
         const d = days[day] || { count: 0, usd: 0, toman: 0 };
         d.count++;
@@ -489,7 +568,7 @@ function createAnalyticsStore(dataDir, opts = {}) {
           toman += r.toman;
         }
         days[day] = d;
-        if (r.name) donors.add(r.name);
+        if (r.name) donorNames.add(r.name);
         kinds[r.kind || 'tip'] = (kinds[r.kind || 'tip'] || 0) + 1;
         sources[r.source || 'other'] = (sources[r.source || 'other'] || 0) + 1;
         if (r.at < oldest) oldest = r.at;
@@ -510,10 +589,13 @@ function createAnalyticsStore(dataDir, opts = {}) {
         month,
         from: new Date(oldest).toISOString(),
         to: new Date(newest).toISOString(),
-        count: recs.length - tests,
+        count,
         usd: Math.round(usd * 100) / 100,
         toman: Math.round(toman),
-        donors: donors.size,
+        donors: donorNames.size,
+        // kept so a later rollup of the same month can merge and deduplicate instead of overwriting the history
+        donorNames: [...donorNames],
+        ids: [...seen],
         days,
         kinds,
         sources,
@@ -534,6 +616,11 @@ function createAnalyticsStore(dataDir, opts = {}) {
 
   /** Remove every file this store owns (used by "clear application data"). */
   function clear() {
+    stopped = true; // prevent any further writes from pending timers/callbacks
+    clearTimeout(flushTimer);
+    flushTimer = null;
+    clearTimeout(donorSaveT);
+    donorSaveT = null;
     for (const file of recentMonthFiles()) {
       try {
         fs.unlinkSync(file);
@@ -553,7 +640,27 @@ function createAnalyticsStore(dataDir, opts = {}) {
     invalidate();
   }
 
+  /**
+   * Re-arm the store after clear(). "Clear application data" stops the store so no pending timer can write a month
+   * file back after the deletion; the application lifecycle reinitialises it, so the store has to be reusable.
+   */
+  function resume(enabled = true) {
+    stopped = false;
+    config.recordingEnabled = !!enabled;
+    pending = [];
+    pendingByDay.clear();
+    flushTimer = null;
+    donorSaveT = null;
+    rolledUpTo = null;
+    donorFirstSeen = null;
+    config.written = 0;
+    config.dropped = 0;
+    droppedToday = 0;
+    invalidate();
+  }
+
   function flushNow() {
+    if (stopped) return;
     clearTimeout(flushTimer);
     flushTimer = null;
     flush();
@@ -565,12 +672,16 @@ function createAnalyticsStore(dataDir, opts = {}) {
     load,
     rollup,
     clear,
+    resume,
     invalidate,
     flush: flushNow,
     donors,
     donorFile,
     rollupDir,
     monthFile,
+    setRecordingEnabled(enabled) {
+      config.recordingEnabled = !!enabled;
+    },
     get stats() {
       return {
         written: config.written,
@@ -581,7 +692,17 @@ function createAnalyticsStore(dataDir, opts = {}) {
       };
     },
     // test hooks: let a test drive the clock and force the day cap
-    _internals: { monthOfDay, countFor, rollups: readRollups, MAX_PER_DAY, KEEP_DETAIL_MONTHS, MAX_RECORDS }
+    _internals: {
+      monthOfDay,
+      countFor,
+      rollups: readRollups,
+      MAX_PER_DAY,
+      KEEP_DETAIL_MONTHS,
+      MAX_RECORDS,
+      validateTimestamp,
+      MIN_VALID_YEAR,
+      MAX_VALID_YEAR
+    }
   };
 }
 
@@ -590,4 +711,13 @@ function dateFromAny(v) {
   return parseTimestamp(v);
 }
 
-module.exports = { createAnalyticsStore, KEEP_DETAIL_MONTHS, MAX_RECORDS, MAX_PER_DAY, FILE_PREFIX, ROLLUP_DIR };
+module.exports = {
+  createAnalyticsStore,
+  KEEP_DETAIL_MONTHS,
+  MAX_RECORDS,
+  MAX_PER_DAY,
+  FILE_PREFIX,
+  ROLLUP_DIR,
+  MIN_VALID_YEAR,
+  MAX_VALID_YEAR
+};

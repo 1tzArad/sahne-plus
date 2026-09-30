@@ -208,6 +208,21 @@ function dedupeItems(items) {
   return { items: [...byId.values()], duplicates };
 }
 
+const MIN_RANGE_YEAR = 2020;
+const MAX_RANGE_YEAR = new Date().getFullYear() + 1; // allow tomorrow
+
+function validateRangeDate(value, label) {
+  const ms = parseTimestamp(value);
+  if (ms === null) {
+    throw new Error(`invalid_${label}`);
+  }
+  const year = new Date(ms).getUTCFullYear();
+  if (year < MIN_RANGE_YEAR || year > MAX_RANGE_YEAR) {
+    throw new Error(`out_of_range_${label}`);
+  }
+  return ms;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Time ranges
 // ---------------------------------------------------------------------------------------------
@@ -218,10 +233,15 @@ function resolveRange(range, { now, tz, from, to, includeTests = false } = {}) {
   const at = Number.isFinite(now) ? now : Date.now();
   let out;
   if (key === 'custom') {
-    const start = startOfDay(parseTimestamp(from) ?? at, tz);
-    const rawEnd = parseTimestamp(to) ?? at;
-    const endDay = rawEnd < start ? start : rawEnd; // a reversed pair collapses to the `from` day
-    const end = startOfNextDay(endDay, tz); // inclusive calendar day, exclusive instant
+    if (!from || !to) {
+      throw new Error('missing_custom_range');
+    }
+    const start = startOfDay(validateRangeDate(from, 'from'), tz);
+    const rawEnd = validateRangeDate(to, 'to');
+    if (rawEnd < start) {
+      throw new Error('from_after_to');
+    }
+    const end = startOfNextDay(rawEnd, tz); // inclusive calendar day, exclusive instant
     out = { key, start, end, granularity: granularityFor(end - start) };
   } else if (key === 'week') {
     out = { key, start: startOfWeek(at, tz), end: at, granularity: 'day' };
@@ -259,11 +279,17 @@ function previousRange(range, tz) {
   const span = range.end - range.start;
   if (range.key === 'month') {
     const start = startOfPreviousJalaliMonth(range.start, tz);
-    return { key: 'custom', start, end: start + span };
+    // Cap the previous period end at range.start so it never enters the current month.
+    const end = Math.min(start + span, range.start);
+    return { key: 'custom', start, end };
   }
   if (range.key === 'week') {
     const start = range.start - 7 * DAY_MS;
     return { key: 'custom', start, end: start + span };
+  }
+  if (range.key === 'custom') {
+    const start = range.start - span;
+    return { key: 'custom', start, end: range.start };
   }
   const start = range.start - DAY_MS;
   return { key: 'custom', start, end: start + span };
@@ -465,7 +491,7 @@ function computeAnalytics(rawItems, options = {}) {
     breakdown: stats.breakdown,
     series,
     distribution: bucketize(
-      inRange.filter(it => it.currency === 'USD').map(it => it.amount),
+      inRange.filter(it => it.currency === 'USD' && !isKickSubOrGift(it)).map(it => it.amount),
       edges
     ),
     topDonors,
@@ -501,40 +527,111 @@ function buildFirstSeen(items) {
   return map;
 }
 
+/** Normalize a donor name for grouping: NFC, trim, collapse whitespace, Arabic->Persian chars, lower-case Latin. */
+function normalizeDonorKey(name) {
+  if (!name) return '';
+  // Unicode NFC normalization
+  let normalized = name.normalize('NFC');
+  // Trim and collapse consecutive whitespace
+  normalized = normalized.trim().replace(/\s+/g, ' ');
+  // Convert Arabic ي -> Persian ی, Arabic ك -> Persian ک
+  normalized = normalized.replace(/ي/g, 'ی').replace(/ك/g, 'ک');
+  // Lower-case Latin characters
+  normalized = normalized.replace(/[A-Z]/g, c => c.toLowerCase());
+  return normalized;
+}
+
+/** Check if a donor name is anonymous/empty. */
+function isAnonymousDonor(name) {
+  if (!name) return true;
+  const trimmed = name.trim();
+  if (!trimmed) return true;
+  // "ناشناس" means "unknown" in Persian
+  if (trimmed === 'ناشناس') return true;
+  return false;
+}
+
+/** Check if an item is a Kick subscription or gift (synthetic USD amount derived from toman). */
+function isKickSubOrGift(it) {
+  return (it.kind === 'sub' || it.kind === 'gift') && it.source === 'kick';
+}
+
 function summarize(items, { tz, donorFirstSeen, edges }) {
-  const usd = items.filter(it => it.currency === 'USD');
+  // Kick subscriptions/gifts have a synthetic USD amount derived from toman; exclude them from USD monetary metrics.
+  const usd = items.filter(it => it.currency === 'USD' && !isKickSubOrGift(it));
   const tomanItems = items.filter(it => it.toman !== null);
   const amountUsd = sum(usd.map(it => it.amount));
   const amountToman = sum(tomanItems.map(it => it.toman));
   const usdValues = usd.map(it => it.amount);
   const tomanValues = tomanItems.map(it => it.toman);
 
-  const donors = new Map();
+  // Group donors by normalized key, track display name and whether anonymous
+  const donors = new Map(); // normalizedKey -> { name (display), normKey, count, usd, toman, last, firstInRange, anonymous }
+  const firstSeenInRange = new Map(); // normalizedKey -> first timestamp in this range
   for (const it of items) {
-    const d = donors.get(it.name) || { name: it.name, count: 0, usd: 0, toman: 0, last: 0 };
+    const anon = isAnonymousDonor(it.name);
+    const normKey = anon ? '__anon__' : normalizeDonorKey(it.name);
+    const displayName = anon ? 'ناشناس' : it.name;
+    const d = donors.get(normKey) || {
+      name: displayName,
+      normKey,
+      count: 0,
+      usd: 0,
+      toman: 0,
+      last: 0,
+      anonymous: anon
+    };
     d.count++;
     if (it.currency === 'USD') d.usd += it.amount;
     if (it.toman !== null) d.toman += it.toman;
     if (it.ts && it.ts > d.last) d.last = it.ts;
-    donors.set(it.name, d);
-  }
-  const donorList = [...donors.values()];
-  const repeatDonors = donorList.filter(d => d.count > 1).length;
-  let newDonors = 0;
-  for (const d of donorList) {
-    const first = donorFirstSeen.get(d.name);
-    if (first === undefined) continue;
-    // "new" means: no donation from this donor is older than the range we are looking at
-    const firstInRange = items.some(it => it.name === d.name && it.ts === first);
-    if (firstInRange) newDonors++;
+    // Track first occurrence in this range per normalized donor
+    if (it.ts !== null) {
+      const prevFirst = firstSeenInRange.get(normKey);
+      if (prevFirst === undefined || it.ts < prevFirst) {
+        firstSeenInRange.set(normKey, it.ts);
+      }
+    }
+    donors.set(normKey, d);
   }
 
-  const tomanSorted = [...donorList].filter(d => d.toman > 0).sort((a, b) => b.toman - a.toman);
+  // Build donorFirstSeen map with normalized keys for O(1) lookup
+  const donorFirstSeenNorm = new Map();
+  for (const [name, at] of donorFirstSeen) {
+    const anon = isAnonymousDonor(name);
+    const normKey = anon ? '__anon__' : normalizeDonorKey(name);
+    const prev = donorFirstSeenNorm.get(normKey);
+    if (prev === undefined || at < prev) {
+      donorFirstSeenNorm.set(normKey, at);
+    }
+  }
+
+  const donorList = [...donors.values()];
+
+  // Filter out anonymous donors for donor metrics
+  const nonAnonDonors = donorList.filter(d => !d.anonymous);
+  const repeatDonors = nonAnonDonors.filter(d => d.count > 1).length;
+
+  // O(n) new donors calculation: a donor is "new" if their first-ever donation is in this range
+  let newDonors = 0;
+  for (const d of nonAnonDonors) {
+    const firstEver = donorFirstSeenNorm.get(d.normKey);
+    const firstInThisRange = firstSeenInRange.get(d.normKey);
+    if (firstEver !== undefined && firstInThisRange !== undefined && firstEver === firstInThisRange) {
+      newDonors++;
+    }
+  }
+
+  // For top donors and largest donor, use non-anonymous donors with toman > 0
+  const tomanSorted = [...nonAnonDonors].filter(d => d.toman > 0).sort((a, b) => b.toman - a.toman);
   const shareOf = n => share(sum(tomanSorted.slice(0, n).map(d => d.toman)), amountToman);
 
   const largestToman = tomanValues.length ? Math.max(...tomanValues) : null;
   const largestUsd = usdValues.length ? Math.max(...usdValues) : null;
+  // The largest *donation* is still found among every item, but an anonymous one has no name to report: a donation
+  // from an unnamed viewer must not be presented as if a named donor made it.
   const biggest = tomanItems.find(it => it.toman === largestToman) || tomanItems[0] || null;
+  const biggestNamed = biggest && !isAnonymousDonor(biggest.name) ? biggest : null;
 
   const activity = buildActivity(items, tz);
 
@@ -548,10 +645,10 @@ function summarize(items, { tz, donorFirstSeen, edges }) {
   return {
     totals: {
       count: items.length,
-      uniqueDonors: donorList.length,
+      uniqueDonors: nonAnonDonors.length,
       repeatDonors,
       newDonors,
-      returningDonors: donorList.length - newDonors,
+      returningDonors: nonAnonDonors.length - newDonors,
       usdCount: usd.length,
       convertedCount: tomanItems.length,
       unconvertedCount: items.filter(it => it.toman === null).length,
@@ -566,8 +663,8 @@ function summarize(items, { tz, donorFirstSeen, edges }) {
       maxToman: tomanValues.length ? Math.max(...tomanValues) : null,
       minUsd: usdValues.length ? round2(Math.min(...usdValues)) : null,
       minToman: tomanValues.length ? Math.min(...tomanValues) : null,
-      largestDonor: biggest ? biggest.name : null,
-      largestAt: biggest && biggest.ts ? new Date(biggest.ts).toISOString() : null,
+      largestDonor: biggestNamed ? biggestNamed.name : null,
+      largestAt: biggestNamed && biggestNamed.ts ? new Date(biggestNamed.ts).toISOString() : null,
       topShare: { top1: shareOf(1), top5: shareOf(5), top10: shareOf(10) },
       perDay: null, // filled after the range is known, below
       perWeek: null
@@ -579,7 +676,7 @@ function summarize(items, { tz, donorFirstSeen, edges }) {
         it => it,
         (it, g) => {
           g.count++;
-          g.amount = round2((g.amount || 0) + (it.currency === 'USD' ? it.amount : 0));
+          if (it.currency === 'USD' && !isKickSubOrGift(it)) g.amount = round2((g.amount || 0) + it.amount);
           g.amountToman = (g.amountToman || 0) + (it.toman || 0);
         }
       ),
@@ -590,7 +687,7 @@ function summarize(items, { tz, donorFirstSeen, edges }) {
         (it, g) => {
           g.count++;
           g.amountToman = (g.amountToman || 0) + (it.toman || 0);
-          g.amountUsd = round2((g.amountUsd || 0) + (it.currency === 'USD' ? it.amount : 0));
+          if (it.currency === 'USD' && !isKickSubOrGift(it)) g.amountUsd = round2((g.amountUsd || 0) + it.amount);
         }
       ),
       bySource: groupBy(
@@ -600,7 +697,7 @@ function summarize(items, { tz, donorFirstSeen, edges }) {
         (it, g) => {
           g.count++;
           g.amountToman = (g.amountToman || 0) + (it.toman || 0);
-          g.amountUsd = round2((g.amountUsd || 0) + (it.currency === 'USD' ? it.amount : 0));
+          if (it.currency === 'USD' && !isKickSubOrGift(it)) g.amountUsd = round2((g.amountUsd || 0) + it.amount);
           if (it.played === false) g.skipped++;
           if (it.played !== false) g.played++;
         }
@@ -642,7 +739,7 @@ function buildActivity(items, tz) {
   const richestDay = pick(tomanByDay, (v, b) => v > b);
   let busiestHour = null;
   for (let h = 0; h < 24; h++)
-    if (byHourPortion[h] && (!busiestHour || byHourPortion[h] > byHourPortion[busiestHour])) busiestHour = h;
+    if (byHourPortion[h] && (busiestHour === null || byHourPortion[h] > byHourPortion[busiestHour])) busiestHour = h;
   return {
     busiestDay: busiestDay ? { key: busiestDay.key, count: busiestDay.value } : null,
     richestDay: richestDay && richestDay.value > 0 ? { key: richestDay.key, toman: richestDay.value } : null,
@@ -667,7 +764,7 @@ function buildSeries(items, range, tz) {
     const key = bucketKeyOf(it.ts, tz, range.granularity);
     const b = byKey.get(key) || { count: 0, usd: 0, toman: 0, converted: 0 };
     b.count++;
-    if (it.currency === 'USD') b.usd += it.amount;
+    if (it.currency === 'USD' && !isKickSubOrGift(it)) b.usd += it.amount;
     if (it.toman !== null) {
       b.toman += it.toman;
       b.converted++;
@@ -695,13 +792,24 @@ function buildSeries(items, range, tz) {
 function buildTopDonors(items, topN) {
   const map = new Map();
   for (const it of items) {
-    const d = map.get(it.name) || { name: it.name, count: 0, usd: 0, toman: 0, converted: 0, largest: 0, last: 0 };
+    if (isAnonymousDonor(it.name)) continue;
+    const normKey = normalizeDonorKey(it.name);
+    const d = map.get(normKey) || {
+      name: it.name,
+      normKey,
+      count: 0,
+      usd: 0,
+      toman: 0,
+      converted: 0,
+      largest: 0,
+      last: 0
+    };
     d.count++;
-    if (it.currency === 'USD') d.usd += it.amount;
+    if (it.currency === 'USD' && !isKickSubOrGift(it)) d.usd += it.amount;
     if (it.toman !== null) d.toman += it.toman;
     d.largest = Math.max(d.largest, it.toman || it.amount);
     if (it.ts && it.ts > d.last) d.last = it.ts;
-    map.set(it.name, d);
+    map.set(normKey, d);
   }
   return [...map.values()]
     .sort((a, b) => b.toman - a.toman || b.usd - a.usd || b.count - a.count)
@@ -763,7 +871,7 @@ function computePrevious(kept, prev, { tz, coverage }) {
   const items = kept.filter(it => it.ts !== null && it.ts >= prev.start && it.ts < prev.end);
   if (!items.length) return null;
   const amountToman = sum(items.filter(it => it.toman !== null).map(it => it.toman));
-  const amountUsd = sum(items.filter(it => it.currency === 'USD').map(it => it.amount));
+  const amountUsd = sum(items.filter(it => it.currency === 'USD' && !isKickSubOrGift(it)).map(it => it.amount));
   return {
     range: { start: new Date(prev.start).toISOString(), end: new Date(prev.end).toISOString() },
     count: items.length,
@@ -808,5 +916,7 @@ module.exports = {
   bucketize,
   DEFAULT_BUCKET_EDGES,
   MAX_BUCKETS,
-  MIN_HEATMAP_EVENTS
+  MIN_HEATMAP_EVENTS,
+  normalizeDonorKey,
+  isAnonymousDonor
 };
