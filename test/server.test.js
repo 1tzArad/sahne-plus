@@ -1023,6 +1023,47 @@ test('disconnecting KickBot drops only its own tips (dashboard tests too); Kick 
   assert.equal(JSON.parse((await req('GET', '/api/config')).body).config.kickbot.configured, false);
 });
 
+test('secret input fields (KickBot widget URL, StreamElements token) are masked and styled', () => {
+  const root = path.join(__dirname, '..');
+  const html = fs.readFileSync(path.join(root, 'public', 'app.html'), 'utf8');
+  const css = fs.readFileSync(path.join(root, 'public', 'app.css'), 'utf8');
+  // The widget URL carries the widget secret: it must not sit readable on screen while streaming.
+  for (const id of ['setupUrl', 'setupUrl2', 'seToken']) {
+    const tag = html.match(new RegExp('<input[^>]*\\bid="' + id + '"[^>]*>'));
+    assert.ok(tag, id + ' input exists');
+    assert.match(tag[0], /type="password"/, id + ' is masked');
+    assert.match(tag[0], /autocomplete="off"/, id + ' is not offered to autofill');
+  }
+  // Without this selector a masked field falls back to the browser default (white box, unreadable dots).
+  assert.match(css, /^input\[type=text\][^{]*input\[type=password\][^{]*\{/m, 'password inputs share the field style');
+});
+
+test('doSetup empties both widget URL fields when the connection succeeds and keeps them when it fails', async () => {
+  const js = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  // app.js is a browser script (it wires the whole page on load), so run just this function against stubs.
+  const src = js.match(/async function doSetup\([^)]*\) \{[\s\S]*?\n\}\n/);
+  assert.ok(src, 'doSetup exists');
+  for (const from of ['#setupUrl', '#setupUrl2']) {
+    for (const ok of [true, false]) {
+      const fields = { '#setupUrl': { value: 'first' }, '#setupUrl2': { value: 'second' }, '#msg': {} };
+      const sent = [];
+      const doSetup = new Function('$', 'post', 'toast', 'load', src[0] + '\nreturn doSetup;')(
+        sel => fields[sel],
+        async (url, body) => (
+          sent.push(body.url),
+          ok ? { ok: true, streamer_id: 1 } : { ok: false, error: 'bad link' }
+        ),
+        () => {},
+        () => {}
+      );
+      await doSetup(from, '#msg');
+      assert.deepEqual(sent, [from === '#setupUrl' ? 'first' : 'second'], 'the field that was used is submitted');
+      const kept = [fields['#setupUrl'].value, fields['#setupUrl2'].value];
+      assert.deepEqual(kept, ok ? ['', ''] : ['first', 'second'], from + (ok ? ' success' : ' failure'));
+    }
+  }
+});
+
 test('in-app legal documents are identical to the repository copies', () => {
   const root = path.join(__dirname, '..');
   const pairs = [
