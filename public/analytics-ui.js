@@ -13,6 +13,7 @@
   let CUSTOM = null; // { from, to } once the user applies a custom range
   let METRIC = 'usd'; // usd | toman | count
   let BUSY = false;
+  let pendingRange = null; // queued range to fetch after current request completes
   let liveT; // debounce timer for a live refresh triggered by the event stream
 
   // ---------- small formatters (the page's own, not a second copy of the app's) ----------
@@ -223,12 +224,12 @@
   // ---------- trend chart ----------
   function metricValue(p, metric) {
     if (metric === 'count') return p.count;
-    if (metric === 'toman') return p.converted ? p.toman : null;
+    if (metric === 'toman') return p.converted && isNum(p.toman) ? p.toman : 0;
     return p.count && !p.usd && p.toman ? null : p.usd;
   }
   const axisFmt = (v, metric) => {
     if (metric === 'count') return faNum(v);
-    if (metric === 'toman') return fmtToman(v);
+    if (metric === 'toman') return v === 0 ? faNum(0) : fmtToman(v);
     return usdShort(v);
   };
 
@@ -304,7 +305,7 @@
           <button data-metric="toman" class="${METRIC === 'toman' ? 'active' : ''}">تومان</button>
           <button data-metric="count" class="${METRIC === 'count' ? 'active' : ''}">تعداد</button>
         </div>
-        <svg class="an-chart" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+        <svg class="an-chart" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="direction: ltr;">
           ${grid}${path}${marks}${xlabels}
         </svg>
         ${zeroNote}`
@@ -342,7 +343,7 @@
         bars += `<text x="${(x + w / 2).toFixed(1)}" y="${(yy - 5).toFixed(1)}" text-anchor="middle">${esc(faNum(b.count))}</text>`;
       bars += `<text class="fa" x="${(x + w / 2).toFixed(1)}" y="${H - 22}" text-anchor="middle">${esc(b.label)}</text>`;
     });
-    return `<svg class="an-chart" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+    return `<svg class="an-chart" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="direction: ltr;">
         <line class="axis" x1="${pad.l}" y1="${pad.t + ih}" x2="${W - pad.r}" y2="${pad.t + ih}"/>${bars}
       </svg>
       <p class="hint">دسته‌ها روی مبلغ دلاری بسته می‌شوند؛ ${esc(faNum(total))} دونیت دلاری در این بازه.</p>`;
@@ -514,7 +515,7 @@
           <div class="kv"><b>میانه‌ی مبلغ (دلار)</b><span class="num">${esc(isNum(t.medianUsd) ? usd(t.medianUsd) : '—')}</span></div>
           <div class="kv"><b>کوچک‌ترین دونیت (دلار)</b><span class="num">${esc(isNum(t.minUsd) ? usd(t.minUsd) : '—')}</span></div>
           <div class="kv"><b>شلوغ‌ترین روز</b><span>${esc(d.activity.busiestDay ? dayKeyLabel(d.activity.busiestDay.key) + ' · ' + faNum(d.activity.busiestDay.count) : '—')}</span></div>
-          <div class="kv"><b>شلوغ‌ترین ساعت</b><span>${esc(d.activity.busiestHour ? faNum(d.activity.busiestHour.hour) + ':۰۰' : '—')}</span></div>
+          <div class="kv"><b>شلوغ‌ترین ساعت</b><span>${esc(d.activity.busiestHour ? faNum(String(d.activity.busiestHour.hour).padStart(2, '0')) + ':۰۰' : '—')}</span></div>
           <div class="kv"><b>سهم ۱ / ۵ / ۱۰ دونیت‌کننده‌ی برتر</b><span class="num">${esc(faNum(t.topShare.top1))}٪ / ${esc(faNum(t.topShare.top5))}٪ / ${esc(faNum(t.topShare.top10))}٪</span></div>
           <div class="kv"><b>دونیت در روز</b><span class="num">${esc(faNum(t.perDay))}</span></div>
           ${
@@ -611,7 +612,11 @@
     return p.toString();
   }
   async function refresh() {
-    if (BUSY) return;
+    if (BUSY) {
+      // Queue the current range to be fetched after the in-flight request completes
+      pendingRange = { range: RANGE, custom: CUSTOM };
+      return;
+    }
     BUSY = true;
     const body = $('#anBody');
     const btn = $('#anRefresh');
@@ -630,6 +635,14 @@
       if (btn) btn.disabled = false;
       const upd = $('#anUpdated');
       if (upd && LAST) upd.textContent = 'به‌روزرسانی: ' + agoText(LAST.generatedAt);
+      // If a range change was queued while we were busy, fetch it now
+      if (pendingRange) {
+        const next = pendingRange;
+        pendingRange = null;
+        RANGE = next.range;
+        CUSTOM = next.custom;
+        refresh();
+      }
     }
   }
 
@@ -708,12 +721,12 @@
     open,
     refresh,
     /**
-     * The admin stream carries no dedicated "tip" event: a donation shows up as a state broadcast (the queue moved)
-     * or a log line ("نمایش دونیت"). Either one is a hint, not a promise, so refresh is debounced and only while the
-     * page is on screen.
+     * The admin stream carries a state broadcast when the queue changes (donation added/played/skipped).
+     * Log lines are not a reliable signal and can cause refresh loops (e.g. analytics API errors logging).
+     * Only react to state changes.
      */
     onEvent(what) {
-      if (!what || (what.type !== 'state' && what.type !== 'log')) return;
+      if (!what || what.type !== 'state') return;
       const page = document.querySelector('.page[data-page="analytics"]');
       if (!page || !page.classList.contains('active')) return;
       clearTimeout(liveT);

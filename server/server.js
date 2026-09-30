@@ -601,6 +601,10 @@ function createServer(opts) {
   // Settings → برنامه → «ثبت تاریخچه‌ی دونیت‌ها». Off means nothing new is written to disk; what was already stored stays
   // until the user clears it, so turning the switch off never silently deletes data.
   const historyOn = () => config.app.recordHistory !== false;
+  // Set the initial recording state on the analytics store
+  if (typeof analytics.setRecordingEnabled === 'function') {
+    analytics.setRecordingEnabled(historyOn());
+  }
   function recordHistory(t, played) {
     if (!historyOn()) return;
     try {
@@ -2260,6 +2264,10 @@ function createServer(opts) {
             recordHistory:
               body.app.recordHistory === undefined ? config.app.recordHistory !== false : !!body.app.recordHistory
           };
+        // Keep the analytics store in sync with the recording switch
+        if (typeof analytics.setRecordingEnabled === 'function') {
+          analytics.setRecordingEnabled(historyOn());
+        }
         if (body.kick && typeof body.kick === 'object') {
           const k = body.kick,
             prevSlug = config.kick.channel,
@@ -2687,6 +2695,10 @@ function createServer(opts) {
           if (!result.recording) result.notes = [...(result.notes || []), { code: 'recording-off' }];
           return json(res, 200, result);
         } catch (e) {
+          // Invalid range parameters are a client error (400), not a server failure (500)
+          if (e && /^(invalid_|out_of_range_|from_after_to|missing_custom_range)/.test(e.message)) {
+            return json(res, 400, { ok: false, error: e.message });
+          }
           log('error', 'محاسبه‌ی آمار ناموفق بود', e.message);
           return json(res, 500, { ok: false, error: 'analytics failed' });
         }
@@ -2756,8 +2768,12 @@ function createServer(opts) {
       fs.writeFileSync(PLAYED_PATH, JSON.stringify(playedOrder));
     } catch {}
     try {
-      analytics.flush(); // never lose a donation that happened in the last few hundred milliseconds
-      analytics.rollup();
+      // PRIVACY.md promises that nothing new is written while the recording switch is off. A rollup rewrites
+      // analytics-donors.json and the rollup summaries, so it must be skipped entirely while recording is disabled.
+      if (historyOn()) {
+        analytics.flush(); // never lose a donation that happened in the last few hundred milliseconds
+        analytics.rollup();
+      }
     } catch {}
     try {
       if (ws) ws.close();
@@ -2776,7 +2792,10 @@ function createServer(opts) {
   // wipe everything this app manages (config, media, played memory, analytics history). The caller confirms with the user first.
   function clearData() {
     stop().catch(() => {});
+    // clear() stops the store so an in-flight capture cannot write a month file back after the deletion. The app
+    // restarts afterwards, but re-arming it here keeps the store usable in the same process (and for tests).
     analytics.clear();
+    analytics.resume(historyOn());
     for (const f of fs.readdirSync(MEDIA)) {
       try {
         fs.unlinkSync(path.join(MEDIA, f));
