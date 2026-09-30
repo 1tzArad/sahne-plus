@@ -38,7 +38,7 @@ Endpoints (all under `http://127.0.0.1:7788`):
 | `/api/upload` | PUT | controller (browser fallback) | media body ≤ 512 MB, extension + content sniff |
 | `/api/scan` | POST | controller | registers files already in the media folder |
 | `/api/setup` | POST | controller | the KickBot widget URL → parsed, secret kept in memory + encrypted store |
-| `/api/disconnect-kickbot` | POST | controller | wipes the secret and streamer id and removes KickBot's tips from the queue; Kick subs, StreamElements tips and test alerts stay queued |
+| `/api/disconnect-kickbot` | POST | controller | wipes the secret and streamer id and removes KickBot's tips (including its dashboard test tips) from the queue; Kick subs, StreamElements tips and the app's own test alerts stay queued |
 | `/api/reset-settings` | POST | controller | defaults for appearance / rate / kick / mode |
 | `/api/test`, `/api/test-sub`, `/api/preview`, `/api/simulate` | POST / GET | controller | simulated events (see §7) |
 | `/api/rate`, `/api/meld-reload`, `/api/skip`, `/api/clear-queue`, `/api/open-media-folder`, `/api/logs` | POST / GET | controller | actions |
@@ -63,7 +63,7 @@ The Browser Source therefore has access to: the overlay page, static assets, med
 | 3.9 | KickBot tip GIF (`gif_url` from the tip event) | HTTPS GET | from the Browser Source, when the tip carries one and no local video/image is used | nothing but the URL | image | `overlay.js addImg()` (https only) |
 | 3.10 | `ws://127.0.0.1:13376` (Meld Studio local API) | WebSocket, loopback | when no Browser Source has been connected for 20 s (at most every 2 min) or on demand | asks Meld to reload the Browser layer whose URL contains `localhost:7788/overlay` | layer list | `meldReloadLayers()` |
 | 3.11 | `https://github.com/AmirEyZed/sahne-plus/releases/latest` (the redirect is read, not followed) | HTTPS HEAD (Chromium network stack, system proxy honoured) | 30 s after start and every 6 hours while «بررسی خودکار نسخه‌ی جدید» is on; on demand from the About page | `User-Agent: SahnePlus/<version>` | the redirect target `…/releases/tag/vX.Y.Z`; only the version is used | `electron/updater.js` `latestReleaseUrl()` |
-| 3.12 | `https://github.com/AmirEyZed/sahne-plus/releases/download/vX.Y.Z/SHA256SUMS.txt` and `…/Sahne-Plus-Setup-X.Y.Z.exe` (GitHub redirects to its release-asset storage) | HTTPS GET | **only after the user clicks «آپدیت»** | `User-Agent: SahnePlus/<version>` | the checksum file and the installer; the installer runs only if its SHA-256 matches | `electron/updater.js` `download()` |
+| 3.12 | `https://github.com/AmirEyZed/sahne-plus/releases/download/vX.Y.Z/SHA256SUMS.txt` and `…/Sahne-Plus-Setup-X.Y.Z.exe` (GitHub redirects to its release-asset storage) | HTTPS GET | **only after the user clicks «آپدیت»**; the checksum file must arrive within 30 s and the installer's response headers within 30 s; the installer download stops when a read, write or the final close makes no progress for 60 s (a write error stops it at once), and the partial file is then deleted if possible | `User-Agent: SahnePlus/<version>` | the checksum file and the installer; the installer runs only if its SHA-256 matches | `electron/updater.js` `download()` |
 | 3.13 | `https://api.streamelements.com/kappa/v2/channels/me` | HTTPS GET | once, when a StreamElements token is entered (1.3.4+) | `Authorization: Bearer <JWT>` | channel id, username, provider | `/api/se/setup` |
 | 3.14 | `wss://astro.streamelements.com` | WebSocket | while a StreamElements account is connected; reconnects every 5–10 s | `subscribe` to `channel.activities` for the own channel with the JWT | activity events; only `tip` is used | `seConnect()`, `parseSeActivity()` |
 | — | optional HTTP CONNECT proxy: `rate.proxy` (user-configured) and, since 1.3.1, the Windows system proxy (resolved by Electron, plain HTTP proxies only) | HTTP | 3.5 and 3.7 (proxies first, direct last); 3.7a only as a retry after a failed direct request | the destinations above pass through it | — | `httpsRequest()`, `routeOrder()` |
@@ -84,6 +84,7 @@ Electron/Chromium platform traffic: the app does not set Google API keys, does n
 | `Documents\Sahne Plus\analytics-rollup\<YYYY-MM>.json` | W (temp file + atomic rename) | per-month summary (count, sums, donors, per-day, kinds, sources, plus the folded record ids) for months older than the 3 newest; the detail file is then deleted. A late record for a month that was already summarised is merged into the existing summary, and a future month is never rolled up | aggregate only, no individual records |
 | `Documents\Sahne Plus\analytics-donors.json` | R/W (temp file + atomic rename) | name → first-seen instant, so "new vs returning donor" survives a rollup | donor names (local only) |
 | `Documents\Sahne Plus\sahne-plus.log` (+ `.1`) | W, rotates at 5 MB | log lines: connection state, tip name / amount / message / media, errors. Secrets are redacted by `safe()` | donor names and messages (personal data of third parties, local only) |
+| `Documents\Sahne Plus\captured.json` | R/W (atomic write via `.tmp` + rename) | KickBot tips already captured but not shown yet (all Browser Sources closed during `capture_tip`): the normalized tip (id, donor name, amount, message, GIF/TTS URLs); restored to the front of the queue on start. Written only when that set changes, deleted when it is empty | donor names and messages (personal data of third parties, local only) |
 | `%APPDATA%\SahnePlus\` | R/W by Chromium | Electron userData: cache, `Local Storage` (only `sp.page`), GPU cache, single-instance lock | low |
 | `Documents\KickAlerts\config.json`, `media\` | **R only, once** | legacy import on first run (copy) | — |
 | `%TEMP%` | — | not used by the app (only by the build script) | — |
@@ -99,14 +100,14 @@ Uninstalling removes the program folder and (by default) `%APPDATA%\SahnePlus`. 
 | `streamer_id` | public identifier | config.json | numeric KickBot id |
 | Kick channel slug / chatroom id / channel id | public identifiers | config.json | public |
 | `rate.proxy` | medium (may embed proxy credentials if the user types them) | config.json plaintext | user-provided |
-| Tip ids (`stripe_pi_id`) | identifiers | memory, played.json, log | KickBot/Stripe payment-intent ids; not usable without the secret |
-| Donor names / messages / usernames | third-party personal data | memory (last 30), log file, overlay | shown on stream by design |
+| Tip ids (`stripe_pi_id`) | identifiers | memory, played.json, captured.json, log | KickBot/Stripe payment-intent ids; not usable without the secret |
+| Donor names / messages / usernames | third-party personal data | memory (last 30), log file, overlay, captured.json (only a captured tip not shown yet) | shown on stream by design |
 
 ## 6. Data classes
 
 - **LOCAL-ONLY**: appearance settings, file tiers/keywords, media files, played ids, logs, window state.
 - **NETWORK-PROCESSED**: the KickBot secret + streamer id (to KickBot), tip ids (to KickBot), Kick channel slug (to kick.com), nothing to anyone else.
-- **PERSISTENT**: config.json, media, played.json, analytics history (month files, rollups, donor index), log, Electron userData.
+- **PERSISTENT**: config.json, media, played.json, captured.json (only while a captured tip waits), analytics history (month files, rollups, donor index), log, Electron userData.
 - **TEMPORARY**: in-memory queues (`pending`, `approved`, capped at 500), last-30 recent list, in-memory log (300 lines), 15-second duplicate keys for Kick events.
 - **CREDENTIAL/SENSITIVE**: KickBot secret (encrypted), optional proxy URL.
 - **THIRD-PARTY DATA**: donor names/amounts/messages and TTS/GIF URLs from KickBot; subscriber/gifter usernames from Kick chat; exchange rate from Bonbast.

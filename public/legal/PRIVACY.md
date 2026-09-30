@@ -1,6 +1,6 @@
 # Sahne Plus — Privacy Policy
 
-_Last updated: 2026-09-27 · Applies to Sahne Plus 1.1.0 and later (the update check exists since 1.3.1; the local Analytics page and its switchable donation history are described in section 3)_
+_Last updated: 2026-09-30 · Applies to Sahne Plus 1.1.0 and later (the update check exists since 1.3.1)_
 
 **خلاصه‌ی فارسی:** Sahne Plus هیچ سرور ابری ندارد. فایل‌های الرت، تنظیمات، لاگ‌ها و تاریخچه‌ی دونیت‌ها فقط روی کامپیوتر شما (پوشه‌ی `Documents\Sahne Plus`) ذخیره می‌شوند. برنامه فقط به سرویس‌هایی وصل می‌شود که برای کارکردش لازم‌اند: کیک‌بات (دونیت‌ها)، فید چت عمومی کیک (ساب‌ها)، baha24.com یا bonbast.com (نرخ دلار) و از نسخه‌ی ۱.۳.۱ گیت‌هاب، فقط برای دیدن شماره‌ی آخرین نسخه (از «تنظیمات» قابل خاموش کردن است). هیچ آپدیتی بدون کلیک شما دانلود یا نصب نمی‌شود. آمار و ردیابیِ بیرونی (یعنی فرستادن داده به ما یا به شخص ثالث) وجود ندارد؛ صفحه‌ی «آمار» فقط روی همین کامپیوتر و از روی داده‌ی خودِ برنامه حساب می‌کند و ثبت آن از «تنظیمات» قابل خاموش کردن است. تبلیغات و گزارش خطای خودکار هم وجود ندارد. ما هیچ داده‌ای از شما دریافت یا فروش نمی‌کنیم، چون اصلاً به ما نمی‌رسد.
 
@@ -25,6 +25,7 @@ All application data lives in `Documents\Sahne Plus`:
 | Your StreamElements JWT token (optional, 1.3.4+) | `config.json` → `se_token_enc` | same protection as the KickBot key (DPAPI). This token controls your whole StreamElements account; the app only reads the tipping feed with it. Removed by «قطع اتصال و حذف توکن». |
 | Alert media you import (videos, images, sounds) | `media\` | copied into this folder; your original files are never modified or deleted |
 | Ids of the last 1000 alerts already shown | `played.json` | prevents replaying a donation after a restart |
+| A KickBot donation whose payment was already taken but that has not been shown yet (name, amount, message, TTS/GIF links) | `captured.json` | only exists while such a donation waits for a Browser Source (every Browser Source closed during the payment). It lets the donation still play after a restart, and is deleted once it plays or leaves the queue (rejected, queue cleared, KickBot disconnected) |
 | Diagnostic log | `sahne-plus.log` | connection status, errors, and for each alert: donor/subscriber name, amount, message and the media used. The KickBot key is never written to the log. Rotates at 5 MB. |
 | Donation history for the local Analytics page (on by default, can be turned off) | `analytics-YYYY-MM.ndjson` (one file per month), `analytics-donors.json`, `analytics-rollup\` | Stores donation events with id, timestamp, donor name, amount, currency, toman value, the exchange rate at that instant, kind, source, gift count, tags, a test flag, and whether the alert played, plus a name → first-seen index. Bounded: at most 5000 events per day; months older than the newest three are reduced to a monthly summary. Nothing is encrypted (it is plain text next to your settings) and nothing is sent anywhere. See "Donation history" below. |
 
@@ -55,7 +56,7 @@ The Analytics page needs a record of past donations, so from the version that in
 
 If you configure a proxy in Settings, or Windows has a system proxy (for example a VPN app in "system proxy" mode), the kick.com and bonbast.com requests go through it — the manual proxy first, then the system proxy, then a direct connection — and baha24.com is retried through them if the direct request fails. Only plain HTTP proxies are used. The KickBot connection and Kick's chat feed do not use a proxy.
 
-The update check can be turned off in Settings → «بررسی خودکار نسخه‌ی جدید». An update is downloaded only when you click «آپدیت»; the installer is verified against the release's `SHA256SUMS.txt` before it runs and replaces the program files only — your data in `Documents\Sahne Plus` stays. Update requests use Chromium's network stack, so a Windows system proxy is used automatically.
+The update check can be turned off in Settings → «بررسی خودکار نسخه‌ی جدید». An update is downloaded only when you click «آپدیت»; the installer is verified against the release's `SHA256SUMS.txt` before it runs and replaces the program files only — your data in `Documents\Sahne Plus` stays. Update requests use Chromium's network stack, so a Windows system proxy is used automatically. If GitHub does not respond within 30 seconds, or the download receives no data for 60 seconds, the download is stopped and the partially downloaded file is deleted where possible; it is not retried automatically — click «آپدیت» again to retry.
 
 These third parties process the data they receive under **their own** privacy policies. Sahne Plus cannot control what KickBot, Kick, Pusher, baha24, Bonbast or GitHub do with a request once it reaches them.
 
@@ -75,7 +76,7 @@ Donation and subscription events contain the names and messages of your viewers.
 
 ## 7. Deleting your data
 
-- **In the app:** Settings → "Clear application data" deletes `config.json`, `played.json`, everything in `media\`, and the donation history files (`analytics-*.ndjson`, `analytics-donors.json`, `analytics-rollup\`) which are stored next to `config.json` in `Documents\Sahne Plus` — after a confirmation, then restarts the app. Settings → "Disconnect KickBot" removes only the widget key. "Reset settings" restores defaults without touching media or the history. To stop new donations from being recorded, use the switch «ثبت تاریخچه‌ی دونیت‌ها» in Settings → «برنامه».
+- **In the app:** Settings → "Clear application data" deletes `config.json`, `played.json`, `captured.json` and everything in `media\`, and the donation history files (`analytics-*.ndjson`, `analytics-donors.json`, `analytics-rollup\`) which are stored next to `config.json` in `Documents\Sahne Plus` — after a confirmation, then restarts the app. Settings → "Disconnect KickBot" removes only the widget key. "Reset settings" restores defaults without touching media or the history. To stop new donations from being recorded, use the switch «ثبت تاریخچه‌ی دونیت‌ها» in Settings → «برنامه».
 - **Manually:** delete the folder `Documents\Sahne Plus`.
 - **Uninstalling** the application removes the program files and Electron's profile folder (`%APPDATA%\SahnePlus`) but **does not** delete `Documents\Sahne Plus`, so your media survives a reinstall.
 - **Autostart:** the uninstaller also removes the "run at Windows login" registry entry (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SahnePlus`), so nothing of the program is left in the registry.

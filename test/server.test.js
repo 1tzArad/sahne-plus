@@ -337,6 +337,320 @@ test('upload streaming + sniffing, suffix Range, config.files merge, capture ret
   assert.ok(seen.includes('"cardDelay":1.5'), 'the per-file card delay reaches the overlay');
 });
 
+test('a tip captured while the Browser Source closes is kept at the front, survives the queue sync and plays once on reconnect', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sahne-test-'));
+  const port = 8600 + Math.floor(Math.random() * 100);
+  fs.writeFileSync(
+    path.join(dir, 'config.json'),
+    JSON.stringify({
+      port,
+      secret_id: 'a'.repeat(32) + ':' + 'b'.repeat(32),
+      streamer_id: 1,
+      rate: { auto: false, manual: 100000 },
+      kick: { enabled: false },
+      app: { autostart: false }
+    })
+  );
+  const captures = [];
+  const published = [];
+  let capturesDone = 0;
+  let duringCapture = null;
+  const srv = createServer({
+    dataDir: dir,
+    publicDir: path.join(__dirname, '..', 'public'),
+    appVersion: 'test',
+    testHooks: {
+      offline: true,
+      captureTip: async tip => {
+        captures.push(tip.stripe_pi_id);
+        if (duringCapture) await duringCapture();
+        capturesDone++;
+        return 'ok';
+      },
+      onPublish: (type, payload) => published.push(type + ':' + payload.stripe_pi_id)
+    }
+  });
+  await srv.start();
+  const overlays = [];
+  t.after(async () => {
+    overlays.forEach(o => o.req.destroy());
+    await srv.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  // polls until cond() is true; fails the test with `what` after 3 s instead of relying on fixed delays
+  const waitFor = async (cond, what) => {
+    for (const end = Date.now() + 3000; Date.now() < end; await sleep(10)) if (await cond()) return;
+    assert.fail('timed out waiting for: ' + what);
+  };
+  const state = () =>
+    new Promise((resolve, reject) =>
+      http
+        .get({ host: '127.0.0.1', port, path: '/api/config' }, res => {
+          let d = '';
+          res.on('data', c => (d += c));
+          res.on('end', () => resolve(JSON.parse(d).state));
+        })
+        .on('error', reject)
+    );
+  const openOverlay = () => {
+    const o = { events: [] };
+    o.req = http.get({ host: '127.0.0.1', port, path: '/events?role=overlay' }, res => {
+      res.setEncoding('utf8');
+      res.on('data', c => o.events.push(c));
+    });
+    o.req.on('error', () => {});
+    overlays.push(o);
+    return o;
+  };
+  const plays = o =>
+    o.events
+      .join('')
+      .split('\n')
+      .filter(l => l.startsWith('data: ') && l.includes('"type":"play"'))
+      .map(l => JSON.parse(l.slice(6)).tip.id);
+  const tipPlays = id => published.filter(p => p === 'tip_play:' + id).length;
+  const tip = id => ({
+    stripe_pi_id: id,
+    tipper_name: 'Donor',
+    amount_total: 500,
+    approval_status: 'approved',
+    created_at: new Date().toISOString()
+  });
+
+  // the only Browser Source closes while KickBot is capturing the payment; another tip arrives meanwhile
+  const first = openOverlay();
+  await waitFor(async () => (await state()).overlays === 1, 'the Browser Source to register');
+  duringCapture = async () => {
+    srv.testHooks.injectTip(tip('pi_second'));
+    first.req.destroy();
+    await waitFor(async () => (await state()).overlays === 0, 'the server to see the Browser Source close');
+  };
+  srv.testHooks.injectTip(tip('pi_drop'));
+  await waitFor(() => capturesDone === 1, 'the capture to finish');
+  duringCapture = null;
+  assert.deepEqual(captures, ['pi_drop']);
+  assert.equal((await state()).playing, null, 'nothing is playing');
+  assert.deepEqual(plays(first), [], 'nothing was sent to the closed Browser Source');
+  assert.equal(srv.testHooks.isPlayed('pi_drop'), false, 'a captured tip that was not shown is not marked as played');
+  assert.deepEqual(srv.testHooks.queueIds(), ['pi_drop', 'pi_second'], 'the captured tip goes back to the FRONT');
+  assert.equal(tipPlays('pi_drop'), 0, 'tip_play is not published while nothing is shown');
+
+  // KickBot may no longer list a captured tip; the queue sync keeps it (an uncaptured tip KickBot no longer lists still goes)
+  srv.testHooks.kickbotSync([]);
+  assert.deepEqual(srv.testHooks.queueIds(), ['pi_drop'], 'the captured tip survives the sync');
+
+  // a Browser Source connects again: the tip plays once and is not captured a second time
+  const second = openOverlay();
+  await waitFor(() => plays(second).length > 0, 'the play event on the new Browser Source');
+  assert.deepEqual(plays(second), ['pi_drop'], 'the tip is shown on the new Browser Source');
+  assert.deepEqual(captures, ['pi_drop'], 'no second capture request for the resumed tip');
+  assert.equal(tipPlays('pi_drop'), 1, 'tip_play is published once, when the tip is shown');
+  assert.equal(srv.testHooks.isPlayed('pi_drop'), true);
+  assert.equal(srv.testHooks.queueLength(), 0);
+});
+
+test('a captured tip waiting for a Browser Source survives a restart and plays once, with no second capture', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sahne-test-'));
+  const port = 8500 + Math.floor(Math.random() * 100);
+  fs.writeFileSync(
+    path.join(dir, 'config.json'),
+    JSON.stringify({
+      port,
+      secret_id: 'a'.repeat(32) + ':' + 'b'.repeat(32),
+      streamer_id: 1,
+      rate: { auto: false, manual: 100000 },
+      kick: { enabled: false },
+      app: { autostart: false }
+    })
+  );
+  const CAPTURED = path.join(dir, 'captured.json');
+  const saved = () => (fs.existsSync(CAPTURED) ? JSON.parse(fs.readFileSync(CAPTURED, 'utf8')) : null);
+  const captures = [];
+  const published = [];
+  let duringCapture = null;
+  const overlays = [];
+  let srv = null;
+  const boot = async () => {
+    srv = createServer({
+      dataDir: dir,
+      publicDir: path.join(__dirname, '..', 'public'),
+      appVersion: 'test',
+      testHooks: {
+        offline: true,
+        captureTip: async tip => {
+          captures.push(tip.stripe_pi_id);
+          if (duringCapture) await duringCapture();
+          return 'ok';
+        },
+        onPublish: (type, payload) => published.push(type + ':' + payload.stripe_pi_id)
+      }
+    });
+    await srv.start();
+  };
+  t.after(async () => {
+    overlays.forEach(o => o.req.destroy());
+    if (srv) await srv.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  // agent: false: no keep-alive socket of a stopped server is reused after a restart
+  const waitFor = async (cond, what) => {
+    for (const end = Date.now() + 3000; Date.now() < end; await sleep(10)) if (await cond()) return;
+    assert.fail('timed out waiting for: ' + what);
+  };
+  const request = (method, p) =>
+    new Promise((resolve, reject) =>
+      http
+        .request(
+          { host: '127.0.0.1', port, agent: false, path: p, method, headers: { Origin: `http://127.0.0.1:${port}` } },
+          res => {
+            let d = '';
+            res.on('data', c => (d += c));
+            res.on('end', () => resolve(JSON.parse(d)));
+          }
+        )
+        .on('error', reject)
+        .end()
+    );
+  const overlayCount = async () => (await request('GET', '/api/config')).state.overlays;
+  const openOverlay = () => {
+    const o = { events: [] };
+    o.req = http.get({ host: '127.0.0.1', port, agent: false, path: '/events?role=overlay' }, res => {
+      res.setEncoding('utf8');
+      res.on('data', c => o.events.push(c));
+    });
+    o.req.on('error', () => {});
+    overlays.push(o);
+    return o;
+  };
+  const plays = o =>
+    o.events
+      .join('')
+      .split('\n')
+      .filter(l => l.startsWith('data: ') && l.includes('"type":"play"'))
+      .map(l => JSON.parse(l.slice(6)).tip.id);
+  const tip = id => ({
+    stripe_pi_id: id,
+    tipper_name: 'Donor ' + id,
+    tip_message: 'hello',
+    amount_total: 500,
+    approval_status: 'approved',
+    created_at: new Date().toISOString()
+  });
+  // the only Browser Source closes while KickBot is capturing the payment (as in the test above)
+  const captureWhileClosing = async (first, alsoQueued) => {
+    if (typeof first === 'string') first = tip(first);
+    const id = first.stripe_pi_id;
+    const o = openOverlay();
+    await waitFor(async () => (await overlayCount()) === 1, 'the Browser Source to register');
+    duringCapture = async () => {
+      if (alsoQueued) srv.testHooks.injectTip(tip(alsoQueued));
+      o.req.destroy();
+      await waitFor(async () => (await overlayCount()) === 0, 'the server to see the Browser Source close');
+    };
+    const before = captures.length;
+    srv.testHooks.injectTip(first);
+    await waitFor(
+      () => captures.length === before + 1 && srv.testHooks.queueIds().includes(id),
+      'the tip to be requeued'
+    );
+    duringCapture = null;
+  };
+
+  await boot();
+  assert.equal(saved(), null, 'no file while nothing captured is waiting');
+
+  // clearing the queue drops a waiting captured tip from the file too
+  await captureWhileClosing('pi_cleared');
+  assert.deepEqual(
+    saved().map(x => x.stripe_pi_id),
+    ['pi_cleared']
+  );
+  await request('POST', '/api/clear-queue');
+  assert.equal(saved(), null, 'clear-queue removes the file');
+
+  // a second tip arrives during the capture: it is not captured, so it is not written
+  await captureWhileClosing('pi_wait', 'pi_uncaptured');
+  assert.deepEqual(srv.testHooks.queueIds(), ['pi_wait', 'pi_uncaptured']);
+  assert.deepEqual(
+    saved().map(x => [x.stripe_pi_id, x.tipper_name, x.tip_message, x.amount_total]),
+    [['pi_wait', 'Donor pi_wait', 'hello', 500]],
+    'only the captured tip is written, as soon as it goes back to the queue'
+  );
+
+  // the app is closed and started again: the tip is back at the front, still captured, and survives a sync that no longer lists it
+  await srv.stop();
+  await boot();
+  assert.deepEqual(
+    srv.testHooks.queueIds(),
+    ['pi_wait'],
+    'the captured tip is restored after a restart (KickBot still lists the other one)'
+  );
+  srv.testHooks.kickbotSync([]);
+  assert.deepEqual(srv.testHooks.queueIds(), ['pi_wait'], 'the restored tip is still marked as captured');
+  const shown = openOverlay();
+  await waitFor(() => plays(shown).length > 0, 'the play event after the restart');
+  assert.deepEqual(plays(shown), ['pi_wait']);
+  assert.deepEqual(captures, ['pi_cleared', 'pi_wait'], 'no second capture request after the restart');
+  assert.deepEqual(
+    published.filter(p => p.startsWith('tip_play:')),
+    ['tip_play:pi_wait'],
+    'tip_play is published once'
+  );
+  assert.equal(srv.testHooks.isPlayed('pi_wait'), true);
+  assert.equal(saved(), null, 'the file is removed once the tip has played');
+
+  // an entry that was already played, a test tip, malformed entries and a corrupt file are not restored
+  await srv.stop();
+  fs.writeFileSync(
+    CAPTURED,
+    JSON.stringify([tip('pi_wait'), { ...tip('pi_test'), is_test: true }, null, 'x', { tipper_name: 'no id' }])
+  );
+  await boot();
+  assert.deepEqual(srv.testHooks.queueIds(), [], 'played, test and malformed entries are ignored');
+  assert.equal(saved(), null, 'and removed from disk');
+
+  // a replay of an alert that already played is captured again; if it has to wait, it is restored although its id is in played.json
+  await captureWhileClosing({ ...tip('pi_wait'), is_replay: true });
+  assert.deepEqual(
+    saved().map(x => [x.stripe_pi_id, x.is_replay]),
+    [['pi_wait', true]]
+  );
+  await srv.stop();
+  await boot();
+  assert.deepEqual(srv.testHooks.queueIds(), ['pi_wait'], 'a waiting replay is restored');
+  const replayed = openOverlay();
+  await waitFor(() => plays(replayed).length > 0, 'the replay to play after the restart');
+  assert.deepEqual(plays(replayed), ['pi_wait']);
+  assert.equal(
+    captures.filter(id => id === 'pi_wait').length,
+    2,
+    'the replay was captured once, not again after the restart'
+  );
+  assert.equal(saved(), null, 'the file is removed once the replay has played');
+
+  await srv.stop();
+  fs.writeFileSync(CAPTURED, '{not json');
+  await boot();
+  assert.deepEqual(srv.testHooks.queueIds(), [], 'a corrupt file is ignored');
+  assert.equal(fs.existsSync(CAPTURED), false, 'and removed');
+
+  // "Clear application data" while a capture is in flight: the file is deleted and not written again when the capture returns
+  const o = openOverlay();
+  await waitFor(async () => (await overlayCount()) === 1, 'the Browser Source to register');
+  duringCapture = async () => {
+    o.req.destroy();
+    await waitFor(async () => (await overlayCount()) === 0, 'the server to see the Browser Source close');
+    fs.writeFileSync(CAPTURED, JSON.stringify([tip('pi_other')]));
+    srv.clearData();
+    assert.equal(fs.existsSync(CAPTURED), false, 'clearData removes captured.json');
+  };
+  srv.testHooks.injectTip(tip('pi_wipe'));
+  await waitFor(() => srv.testHooks.queueIds().includes('pi_wipe'), 'the capture to return');
+  assert.equal(fs.existsSync(CAPTURED), false, 'nothing is written after the wipe');
+});
+
 test('event streams: foreign pages are refused and the number of streams is bounded (1.3.2)', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sahne-test-'));
   const port = 8000 + Math.floor(Math.random() * 100);
@@ -625,7 +939,7 @@ test('other currencies: rates are read from baha24 / bonbast and a StreamElement
   assert.equal(state.playing.toman, 1250000, 'and carries the same toman value as the recent list');
 });
 
-test('disconnecting KickBot drops only its own tips; Kick subs, StreamElements tips and test alerts stay queued', async t => {
+test('disconnecting KickBot drops only its own tips (dashboard tests too); Kick subs, StreamElements tips and the app test alerts stay queued', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sahne-test-'));
   const port = 8400 + Math.floor(Math.random() * 100);
   fs.writeFileSync(
@@ -650,10 +964,16 @@ test('disconnecting KickBot drops only its own tips; Kick subs, StreamElements t
     await srv.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  const req = (method, p) =>
+  const req = (method, p, body) =>
     new Promise((resolve, reject) => {
       const r = http.request(
-        { host: '127.0.0.1', port, path: p, method, headers: { Origin: `http://127.0.0.1:${port}` } },
+        {
+          host: '127.0.0.1',
+          port,
+          path: p,
+          method,
+          headers: { Origin: `http://127.0.0.1:${port}`, 'Content-Type': 'application/json' }
+        },
         res => {
           let d = '';
           res.on('data', c => (d += c));
@@ -661,23 +981,87 @@ test('disconnecting KickBot drops only its own tips; Kick subs, StreamElements t
         }
       );
       r.on('error', reject);
+      if (body) r.write(JSON.stringify(body));
       r.end();
     });
-  // no Browser Source is connected, so everything injected stays in the queue
-  const base = {
+  // no Browser Source is connected, so every alert stays in the queue; each one enters through its real path
+  const kb = (id, extra) => ({
+    stripe_pi_id: id,
     tipper_name: 'Donor',
     amount_total: 500,
-    approval_status: 'approved',
-    created_at: new Date().toISOString()
-  };
-  srv.testHooks.injectTip({ ...base, stripe_pi_id: 'pi_kickbot' });
-  srv.testHooks.injectTip({ ...base, stripe_pi_id: 'se_tip', is_local: true, source: 'streamelements' });
-  srv.testHooks.injectTip({ ...base, stripe_pi_id: 'sub_kick', is_local: true, kind: 'sub', count: 1 });
-  srv.testHooks.injectTip({ ...base, stripe_pi_id: 'test_alert', is_test: true, is_local: true });
-  assert.equal(srv.testHooks.queueLength(), 4);
+    created_at: new Date().toISOString(),
+    ...extra
+  });
+  srv.testHooks.kickbotEvent('tip_initiated', kb('pi_kickbot', { approval_status: 'approved' }));
+  srv.testHooks.kickbotEvent('tip_initiated', kb('pi_dashboard_test', { approval_status: 'approved', is_test: true }));
+  srv.testHooks.kickbotEvent('tip_initiated', kb('pi_pending', { approval_status: 'pending' }));
+  srv.testHooks.injectTip(
+    parseSeActivity({ _id: 'se1', type: 'tip', data: { username: 'Donor', amount: 5, currency: 'EUR' } })
+  );
+  assert.equal((await req('POST', '/api/test-sub', { kind: 'sub', name: 'Subber' })).status, 200);
+  assert.equal((await req('POST', '/api/test', { name: 'Tester', amount: 5 })).status, 200);
+  const before = srv.testHooks.queueIds();
+  assert.equal(before.length, 5, before.join());
+  assert.deepEqual(srv.testHooks.pendingIds(), ['pi_pending']);
   assert.equal((await req('POST', '/api/disconnect-kickbot')).status, 200);
-  assert.deepEqual(srv.testHooks.queueIds(), ['se_tip', 'sub_kick', 'test_alert'], 'only the KickBot tip is removed');
+  const after = srv.testHooks.queueIds();
+  assert.deepEqual(
+    after,
+    before.filter(id => !id.startsWith('pi_')),
+    'KickBot tips, including its dashboard test tip, are removed'
+  );
+  assert.ok(after.includes('se_se1'), 'StreamElements tip kept');
+  assert.ok(
+    after.some(id => id.startsWith('sub_')),
+    'Kick sub kept'
+  );
+  assert.ok(
+    after.some(id => id.startsWith('test_')),
+    'test alert from the app kept'
+  );
+  assert.deepEqual(srv.testHooks.pendingIds(), [], 'KickBot pending tip removed');
   assert.equal(JSON.parse((await req('GET', '/api/config')).body).config.kickbot.configured, false);
+});
+
+test('secret input fields (KickBot widget URL, StreamElements token) are masked and styled', () => {
+  const root = path.join(__dirname, '..');
+  const html = fs.readFileSync(path.join(root, 'public', 'app.html'), 'utf8');
+  const css = fs.readFileSync(path.join(root, 'public', 'app.css'), 'utf8');
+  // The widget URL carries the widget secret: it must not sit readable on screen while streaming.
+  for (const id of ['setupUrl', 'setupUrl2', 'seToken']) {
+    const tag = html.match(new RegExp('<input[^>]*\\bid="' + id + '"[^>]*>'));
+    assert.ok(tag, id + ' input exists');
+    assert.match(tag[0], /type="password"/, id + ' is masked');
+    assert.match(tag[0], /autocomplete="off"/, id + ' is not offered to autofill');
+  }
+  // Without this selector a masked field falls back to the browser default (white box, unreadable dots).
+  assert.match(css, /^input\[type=text\][^{]*input\[type=password\][^{]*\{/m, 'password inputs share the field style');
+});
+
+test('doSetup empties both widget URL fields when the connection succeeds and keeps them when it fails', async () => {
+  const js = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  // app.js is a browser script (it wires the whole page on load), so run just this function against stubs.
+  const src = js.match(/async function doSetup\([^)]*\) \{[\s\S]*?\n\}\n/);
+  assert.ok(src, 'doSetup exists');
+  for (const from of ['#setupUrl', '#setupUrl2']) {
+    for (const ok of [true, false]) {
+      const fields = { '#setupUrl': { value: 'first' }, '#setupUrl2': { value: 'second' }, '#msg': {} };
+      const sent = [];
+      const doSetup = new Function('$', 'post', 'toast', 'load', src[0] + '\nreturn doSetup;')(
+        sel => fields[sel],
+        async (url, body) => (
+          sent.push(body.url),
+          ok ? { ok: true, streamer_id: 1 } : { ok: false, error: 'bad link' }
+        ),
+        () => {},
+        () => {}
+      );
+      await doSetup(from, '#msg');
+      assert.deepEqual(sent, [from === '#setupUrl' ? 'first' : 'second'], 'the field that was used is submitted');
+      const kept = [fields['#setupUrl'].value, fields['#setupUrl2'].value];
+      assert.deepEqual(kept, ok ? ['', ''] : ['first', 'second'], from + (ok ? ' success' : ' failure'));
+    }
+  }
 });
 
 test('in-app legal documents are identical to the repository copies', () => {

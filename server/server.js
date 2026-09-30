@@ -462,6 +462,7 @@ function createServer(opts) {
   const MEDIA = path.join(DATA, 'media');
   const CFG_PATH = path.join(DATA, 'config.json');
   const PLAYED_PATH = path.join(DATA, 'played.json');
+  const CAPTURED_PATH = path.join(DATA, 'captured.json');
   const APP_VERSION = opts.appVersion || '0.0.0';
   const NODE_OK = typeof fetch === 'function' && typeof WebSocket === 'function';
   const store = opts.secretStore || null;
@@ -749,6 +750,7 @@ function createServer(opts) {
     }
   }
   function sendState() {
+    saveCaptured(); // every queue change ends here
     broadcast('admin', { type: 'state', state: publicState() });
   }
   function kbStatus() {
@@ -854,6 +856,38 @@ function createServer(opts) {
     playTimeout = null;
   const recent = [];
   const timers = [];
+
+  // ---------- captured tips not shown yet (survive a restart: the payment is taken, KickBot may no longer list the tip) ----------
+  let capturedSaved = null;
+  try {
+    const arr = JSON.parse(fs.readFileSync(CAPTURED_PATH, 'utf8'));
+    if (Array.isArray(arr))
+      for (const x of arr.slice(0, 500)) {
+        const t = x && typeof x === 'object' && normalizeTip(x);
+        // an already played id is skipped, except for a replay (as in tryNext())
+        if (!t || !t.stripe_pi_id || t.is_test || (!t.is_replay && playedIds.has(t.stripe_pi_id))) continue;
+        if (approved.some(y => y.stripe_pi_id === t.stripe_pi_id)) continue;
+        approved.push({ ...t, captured: true });
+        log('info', 'دونیت پرداخت‌شده‌ای که نمایش داده نشده بود به صف برگشت', tipSummary(t));
+      }
+  } catch {}
+  saveCaptured(); // rewrites what was restored; played, malformed or unreadable entries do not stay on disk
+  function saveCaptured() {
+    if (stopped) return; // Clear application data deletes the file after stop()
+    const list = approved.filter(t => t.captured);
+    const key = list.map(t => t.stripe_pi_id).join(',');
+    if (key === capturedSaved) return;
+    try {
+      if (list.length) {
+        const tmp = CAPTURED_PATH + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(list.map(normalizeTip)));
+        fs.renameSync(tmp, CAPTURED_PATH);
+      } else fs.rmSync(CAPTURED_PATH, { force: true });
+      capturedSaved = key;
+    } catch (e) {
+      log('warn', 'ذخیره‌ی دونیت پرداخت‌شده روی دیسک ناموفق بود', e.message);
+    }
+  }
   function connect() {
     if (stopped || !NODE_OK || !secret || !config.streamer_id) return;
     if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
@@ -909,6 +943,7 @@ function createServer(opts) {
     }, 10000)
   );
   function publish(event_type, payload) {
+    if (opts.testHooks && typeof opts.testHooks.onPublish === 'function') opts.testHooks.onPublish(event_type, payload);
     if (!ws || ws.readyState !== 1) return;
     ws.send(
       JSON.stringify({
@@ -931,7 +966,8 @@ function createServer(opts) {
       is_test: !!p.is_test,
       gif_url: httpsUrl(p.gif_url),
       audio_url: httpsUrl(p.audio_url),
-      created_at: p.created_at
+      created_at: p.created_at,
+      source: 'kickbot'
     };
   }
   function handleEvent(type, raw) {
@@ -1004,29 +1040,31 @@ function createServer(opts) {
       });
       if (!r.ok) return;
       const j = await r.json();
-      const list = (Array.isArray(j.tip_transactions) ? j.tip_transactions : [])
-        .map(normalizeTip)
-        .filter(t => t.stripe_pi_id);
-      const pendIds = new Set(pending.map(t => t.stripe_pi_id)),
-        apprIds = new Set(approved.map(t => t.stripe_pi_id));
-      for (const t of list) {
-        const id = t.stripe_pi_id;
-        if ((playing && playing.stripe_pi_id === id) || playedIds.has(id)) continue;
-        if (t.approval_status === 'approved') {
-          if (pendIds.has(id)) {
-            pending = pending.filter(x => x.stripe_pi_id !== id);
-            approved.push(t);
-          } else if (!apprIds.has(id)) approved.push(t);
-        } else if (t.approval_status === 'pending' && !pendIds.has(id) && !apprIds.has(id)) pending.push(t);
-      }
-      const ids = new Set(list.map(t => t.stripe_pi_id));
-      pending = pending.filter(t => ids.has(t.stripe_pi_id) || t.is_test || t.is_local);
-      approved = approved.filter(t => ids.has(t.stripe_pi_id) || t.is_test || t.is_local);
-      tryNext();
-      sendState();
+      applyQueueSync(Array.isArray(j.tip_transactions) ? j.tip_transactions : []);
     } catch (e) {
       log('warn', 'همگام‌سازی صف کیک‌بات ناموفق بود', e.name === 'TimeoutError' ? 'timeout' : e.message);
     }
+  }
+  function applyQueueSync(raw) {
+    const list = raw.map(normalizeTip).filter(t => t.stripe_pi_id);
+    const pendIds = new Set(pending.map(t => t.stripe_pi_id)),
+      apprIds = new Set(approved.map(t => t.stripe_pi_id));
+    for (const t of list) {
+      const id = t.stripe_pi_id;
+      if ((playing && playing.stripe_pi_id === id) || playedIds.has(id)) continue;
+      if (t.approval_status === 'approved') {
+        if (pendIds.has(id)) {
+          pending = pending.filter(x => x.stripe_pi_id !== id);
+          approved.push(t);
+        } else if (!apprIds.has(id)) approved.push(t);
+      } else if (t.approval_status === 'pending' && !pendIds.has(id) && !apprIds.has(id)) pending.push(t);
+    }
+    const ids = new Set(list.map(t => t.stripe_pi_id));
+    pending = pending.filter(t => ids.has(t.stripe_pi_id) || t.is_test || t.is_local);
+    // a captured tip may no longer be listed by KickBot but still waits here to be shown (Browser Source closed during the capture)
+    approved = approved.filter(t => ids.has(t.stripe_pi_id) || t.is_test || t.is_local || t.captured);
+    tryNext();
+    sendState();
   }
   timers.push(
     setInterval(() => {
@@ -1886,7 +1924,7 @@ function createServer(opts) {
     try {
       playing = t;
       sendState();
-      if (!t.is_test && !t.is_local) {
+      if (!t.is_test && !t.is_local && !t.captured) {
         const res = await capture(t);
         if (!playing || playing.stripe_pi_id !== t.stripe_pi_id) return; // skipped / cleared while capturing
         if (res !== 'ok') {
@@ -1923,8 +1961,18 @@ function createServer(opts) {
           next = approved.length > 1;
           return; // other tips need not wait; the failed one is retried after the delay
         }
-        publish('tip_play', { stripe_pi_id: t.stripe_pi_id });
+        t.captured = true; // the payment is taken: this tip is never captured again
       }
+      if (clients.overlay.size === 0) {
+        // every Browser Source closed while the payment was being captured: showing now would reach nobody, so the
+        // tip goes back to the front of the queue (not marked as played) and plays when a Browser Source connects
+        playing = null;
+        approved.unshift(t);
+        log('warn', 'هیچ Browser Source ای متصل نیست؛ دونیت پرداخت‌شده در صف ماند تا دوباره وصل شود', tipSummary(t));
+        sendState();
+        return;
+      }
+      if (!t.is_test && !t.is_local) publish('tip_play', { stripe_pi_id: t.stripe_pi_id });
       captureFailures.delete(t.stripe_pi_id);
       markPlayed(t.stripe_pi_id);
       showTip(t);
@@ -2606,9 +2654,9 @@ function createServer(opts) {
       if (p === '/api/disconnect-kickbot' && req.method === 'POST') {
         secret = '';
         config.streamer_id = null;
-        // drop only KickBot's tips; Kick subs, StreamElements tips and test alerts stay queued (same rule as the queue sync)
-        pending = pending.filter(t => t.is_test || t.is_local);
-        approved = approved.filter(t => t.is_test || t.is_local);
+        // drop only KickBot's tips (including its dashboard test tips); Kick subs, StreamElements tips and the app's own test alerts stay queued
+        pending = pending.filter(t => t.source !== 'kickbot');
+        approved = approved.filter(t => t.source !== 'kickbot');
         saveConfig();
         if (ws) {
           try {
@@ -2801,7 +2849,7 @@ function createServer(opts) {
         fs.unlinkSync(path.join(MEDIA, f));
       } catch {}
     }
-    for (const f of [CFG_PATH, PLAYED_PATH]) {
+    for (const f of [CFG_PATH, PLAYED_PATH, CAPTURED_PATH, CAPTURED_PATH + '.tmp']) {
       try {
         fs.unlinkSync(f);
       } catch {}
@@ -2816,6 +2864,7 @@ function createServer(opts) {
 
   const testHooks = opts.testHooks
     ? {
+        kickbotSync: raw => applyQueueSync(raw),
         injectTip: t => {
           approved.push(t);
           tryNext();
@@ -2826,6 +2875,8 @@ function createServer(opts) {
         },
         queueLength: () => approved.length,
         queueIds: () => approved.map(t => t.stripe_pi_id),
+        pendingIds: () => pending.map(t => t.stripe_pi_id),
+        kickbotEvent: (type, raw) => handleEvent(type, raw),
         isPlayed: id => playedIds.has(id)
       }
     : undefined;
