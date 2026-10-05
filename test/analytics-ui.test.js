@@ -319,3 +319,23 @@ test('an admin log line does not trigger an analytics refresh, a queue change do
   await new Promise(r => setTimeout(r, 1400));
   assert.equal(asked.length, 2, 'a donation changing the queue refreshes the page');
 });
+
+test('a span under an hour shows no per-hour rate, but the gap between the donations is still shown', async () => {
+  const api = async () =>
+    payload({ sequences: { gapCount: 2, medianGapMin: 1, perHour: null, spanHours: 0, medianToman: 5000000 } });
+  const { ANALYTICS, el: $ } = loadPage(api);
+  await ANALYTICS.refresh();
+
+  const body = $('anBody').innerHTML;
+  assert.ok(!body.includes('دونیت در ساعت (فعال)'), 'no per-hour rate is invented out of a sub-hour span');
+  assert.ok(body.includes('میانه‌ی فاصله بین دونیت‌ها'), 'the gap itself is a fact and is still shown');
+
+  // with a real span both rows are there
+  const withSpan = async () =>
+    payload({ sequences: { gapCount: 2, medianGapMin: 45, perHour: 2, spanHours: 1.5, medianToman: 5000000 } });
+  const second = loadPage(withSpan);
+  await second.ANALYTICS.refresh();
+  const html = second.el('anBody').innerHTML;
+  assert.ok(html.includes('دونیت در ساعت (فعال)'), 'a span of an hour or more reports a rate');
+  assert.ok(html.includes('میانه‌ی فاصله بین دونیت‌ها'));
+});

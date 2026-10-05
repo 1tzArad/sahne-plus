@@ -201,6 +201,39 @@ test('custom range includes both end days and picks a granularity from its lengt
   assert.throws(() => run(spread, { range: 'custom', from: 'nonsense', to: '2026-09-18' }), /invalid_from/);
   assert.throws(() => run(spread, { range: 'custom', from: '2019-01-01', to: '2026-09-18' }), /out_of_range_from/);
   assert.throws(() => run(spread, { range: 'custom', from: '2026-09-18', to: '2099-01-01' }), /out_of_range_to/);
+  assert.throws(() => run(spread, { range: 'custom', from: '2026-02-30', to: '2026-09-18' }), /invalid_from/);
+});
+
+test('a plain YYYY-MM-DD bound is that calendar day in the timezone, east and west of UTC', () => {
+  const items = [
+    { id: 'a', ts: '2026-10-01T02:00:00Z', name: 'A', amount: 5, currency: 'USD' }, // 30 Sep, 22:00 in UTC−4
+    { id: 'b', ts: '2026-10-01T12:00:00Z', name: 'B', amount: 7, currency: 'USD' } // 1 Oct, 08:00 in UTC−4
+  ];
+  const day = (tz, items2 = items) =>
+    A.computeAnalytics(items2, {
+      range: 'custom',
+      from: '2026-10-01',
+      to: '2026-10-01',
+      now: NOW,
+      tz,
+      rate: { value: 1000000 }
+    });
+
+  // West of UTC: read as UTC midnight the bound would snap back to the 30th and the whole day would shift by one.
+  const west = day(-240);
+  assert.equal(A.dateKey(west.range.startMs, -240), '2026-10-01', 'the range opens on the 1st locally');
+  assert.equal(A.dateKey(west.range.endMs - 1, -240), '2026-10-01', 'and closes at the end of the 1st locally');
+  assert.equal(west.totals.amountUsd, 7, 'only the donation that falls on the 1st west of UTC');
+  assert.equal(west.topDonors[0].name, 'B');
+
+  // East of UTC the same string must keep working exactly as before.
+  const east = day(TZ, [
+    { id: 'a', ts: '2026-10-01T02:00:00Z', name: 'A', amount: 5, currency: 'USD' }, // 1 Oct, 05:30 in Tehran
+    { id: 'b', ts: '2026-09-30T20:00:00Z', name: 'B', amount: 7, currency: 'USD' } // 30 Sep, 23:30 in Tehran
+  ]);
+  assert.equal(A.dateKey(east.range.startMs, TZ), '2026-10-01');
+  assert.equal(A.dateKey(east.range.endMs - 1, TZ), '2026-10-01');
+  assert.equal(east.totals.amountUsd, 5, 'the 30th in Tehran stays out of the 1st');
 });
 
 test('a long custom range coarsens instead of exploding into thousands of buckets', () => {
@@ -557,6 +590,20 @@ test('the gap between donations and the per-active-hour rate are reported, and n
   const one = run([items[0]], { range: 'today' });
   assert.equal(one.sequences.gapCount, 0);
   assert.equal(one.sequences.perHour, null, 'one donation says nothing about frequency');
+
+  // Three donations a minute apart: a span below an hour has no per-hour rate to report, only a huge number.
+  const burst = [0, 1, 2].map((min, i) => ({
+    id: 'b' + i,
+    ts: new Date(Date.UTC(2026, 8, 24, 8, min)).toISOString(),
+    name: 'C' + i,
+    amount: 5,
+    currency: 'USD',
+    toman: 5000000
+  }));
+  const tight = run(burst, { range: 'today' });
+  assert.equal(tight.sequences.perHour, null, 'a span under an hour is not divided into a per-hour rate');
+  assert.equal(tight.sequences.spanHours, 0, 'the span itself is still reported');
+  assert.equal(tight.sequences.medianGapMin, 1, 'the gaps are still reported');
 });
 
 test('the previous-period comparison is null when history does not reach back that far', () => {
@@ -1633,6 +1680,11 @@ test('Kick subscriptions are excluded from USD monetary metrics but counted in t
     1,
     'only the tip is in the distribution'
   );
+  // A donor's dollar figure follows the same rule everywhere: a Kick sub/gift has no USD of its own.
+  const b = r.topDonors.find(d => d.name === 'B');
+  assert.equal(b.usd, 0, 'the Kick sub carries no dollars in the donor list either');
+  assert.equal(b.toman, 4990000, 'its Toman value is still counted');
+  assert.equal(r.topDonors.find(d => d.name === 'A').usd, 10, 'a real USD tip keeps its dollars');
 });
 
 test('record() rejects timestamps outside a sane range', () => {

@@ -520,8 +520,12 @@
           <div class="kv"><b>دونیت در روز</b><span class="num">${esc(faNum(t.perDay))}</span></div>
           ${
             d.sequences && d.sequences.perHour !== null
-              ? `<div class="kv"><b>دونیت در ساعت (فعال)</b><span class="num">${esc(faNum(d.sequences.perHour))}</span></div>
-                 <div class="kv"><b>میانه‌ی فاصله بین دونیت‌ها</b><span>${esc(faNum(d.sequences.medianGapMin))} دقیقه</span></div>`
+              ? `<div class="kv"><b>دونیت در ساعت (فعال)</b><span class="num">${esc(faNum(d.sequences.perHour))}</span></div>`
+              : ''
+          }
+          ${
+            d.sequences && d.sequences.medianGapMin !== null
+              ? `<div class="kv"><b>میانه‌ی فاصله بین دونیت‌ها</b><span>${esc(faNum(d.sequences.medianGapMin))} دقیقه</span></div>`
               : ''
           }
         </div>

@@ -107,7 +107,7 @@ Uninstalling removes the program folder and (by default) `%APPDATA%\SahnePlus`. 
 
 - **LOCAL-ONLY**: appearance settings, file tiers/keywords, media files, played ids, logs, window state.
 - **NETWORK-PROCESSED**: the KickBot secret + streamer id (to KickBot), tip ids (to KickBot), Kick channel slug (to kick.com), nothing to anyone else.
-- **PERSISTENT**: config.json, media, played.json, analytics history (month files, rollups, donor index), log, Electron userData.
+- **PERSISTENT**: config.json, media, played.json, captured.json (only while a captured tip waits), analytics history (month files, rollups, donor index), log, Electron userData.
 - **TEMPORARY**: in-memory queues (`pending`, `approved`, capped at 500), last-30 recent list, in-memory log (300 lines), 15-second duplicate keys for Kick events.
 - **CREDENTIAL/SENSITIVE**: KickBot secret (encrypted), optional proxy URL.
 - **THIRD-PARTY DATA**: donor names/amounts/messages and TTS/GIF URLs from KickBot; subscriber/gifter usernames from Kick chat; exchange rate from Bonbast.

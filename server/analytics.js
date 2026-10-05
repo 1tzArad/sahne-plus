@@ -211,12 +211,29 @@ function dedupeItems(items) {
 const MIN_RANGE_YEAR = 2020;
 const MAX_RANGE_YEAR = new Date().getFullYear() + 1; // allow tomorrow
 
-function validateRangeDate(value, label) {
-  const ms = parseTimestamp(value);
-  if (ms === null) {
+/**
+ * A range bound written as a bare calendar day ("2026-10-01") means that day in `tz`. Reading it with Date.parse
+ * would place it at UTC midnight, and snapping that to the local day lands on the *previous* day anywhere west of
+ * UTC — so it is built as local midnight in `tz` instead, then snapped exactly like any other bound.
+ * Returns null when the value is not a bare date, and NaN for an impossible one (2026-02-30), which is rejected
+ * rather than silently rolled into March.
+ */
+function dateOnlyInTz(value, tz) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(typeof value === 'string' ? value.trim() : '');
+  if (!m) return null;
+  const ms = fromLocal(Number(m[1]), Number(m[2]), Number(m[3]), 0, 0, tz);
+  const p = localParts(ms, tz);
+  return p.y === Number(m[1]) && p.m === Number(m[2]) && p.d === Number(m[3]) ? ms : NaN;
+}
+
+function validateRangeDate(value, label, tz = 0) {
+  const local = dateOnlyInTz(value, tz);
+  const ms = local === null ? parseTimestamp(value) : local;
+  if (ms === null || !Number.isFinite(ms)) {
     throw new Error(`invalid_${label}`);
   }
-  const year = new Date(ms).getUTCFullYear();
+  // The year is judged in `tz`, not in UTC: 2020-01-01 at +14:00 is 2019-12-31T10:00Z but still the year 2020.
+  const year = localParts(ms, tz).y;
   if (year < MIN_RANGE_YEAR || year > MAX_RANGE_YEAR) {
     throw new Error(`out_of_range_${label}`);
   }
@@ -236,8 +253,8 @@ function resolveRange(range, { now, tz, from, to, includeTests = false } = {}) {
     if (!from || !to) {
       throw new Error('missing_custom_range');
     }
-    const start = startOfDay(validateRangeDate(from, 'from'), tz);
-    const rawEnd = validateRangeDate(to, 'to');
+    const start = startOfDay(validateRangeDate(from, 'from', tz), tz);
+    const rawEnd = validateRangeDate(to, 'to', tz);
     if (rawEnd < start) {
       throw new Error('from_after_to');
     }
@@ -582,7 +599,7 @@ function summarize(items, { tz, donorFirstSeen, edges }) {
       anonymous: anon
     };
     d.count++;
-    if (it.currency === 'USD') d.usd += it.amount;
+    if (it.currency === 'USD' && !isKickSubOrGift(it)) d.usd += it.amount;
     if (it.toman !== null) d.toman += it.toman;
     if (it.ts && it.ts > d.last) d.last = it.ts;
     // Track first occurrence in this range per normalized donor
@@ -836,8 +853,9 @@ function buildSequences(stamps, amountToman) {
     gapCount: gaps.length,
     medianGapMin: medianGap === null ? null : Math.round(medianGap * 10) / 10,
     medianToman: medianToman === null ? null : Math.round(medianToman),
-    // donations per active hour: a rate the streamer can act on, not a raw gap
-    perHour: spanMs > 0 ? Math.round((stamps.length / (spanMs / HOUR_MS)) * 100) / 100 : null,
+    // donations per active hour: a rate the streamer can act on, not a raw gap. Dividing by a span shorter than an
+    // hour turns three donations a minute apart into millions per hour, so under an hour there is no rate to report.
+    perHour: spanMs >= HOUR_MS ? Math.round((stamps.length / (spanMs / HOUR_MS)) * 100) / 100 : null,
     spanHours: spanMs > 0 ? Math.round((spanMs / HOUR_MS) * 10) / 10 : null
   };
 }

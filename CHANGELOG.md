@@ -2,6 +2,12 @@
 
 All notable changes to the public builds. Versions follow semantic versioning.
 
+## Unreleased
+
+- New: **آمار (Analytics)** page. From the moment this version is installed, every donation whose alert is shown is recorded locally (id, time, donor, amount + currency, toman value and rate at that instant, kind, source, whether the alert played) and the page aggregates it: totals in dollar and toman, count, average, median, largest, smallest, unique / repeat / new / returning donors, daily and hourly activity, top donors, amount buckets, per-kind and per-source breakdown, and a weekday × hour heatmap (hidden while the sample is too small to mean anything). Ranges: today, this week (Saturday-anchored), this month (Persian calendar), or a custom span. Toman values are the ones recorded at donation time, not today's rate — the page says so explicitly. History is bounded: one file per month, at most 5000 events a day, months older than the newest three collapsed into a monthly summary.
+- New: `/api/analytics` (read-only) and `analytics-ui.js`. The page is computed entirely on this computer from the app's own data; nothing leaves it. See PRIVACY.md and docs/DATA_FLOW.md.
+- New: a Settings switch «ثبت تاریخچه‌ی دونیت‌ها روی این کامپیوتر» under «برنامه» stops recording the donation history. It is on by default; switching it off writes nothing new and keeps what was already recorded (delete it with «پاک کردن همه‌ی داده‌های برنامه»). PRIVACY.md section 3 describes the history, its files and its bounds.
+
 ## 1.3.9 — 2026-10-01
 
 - Fixed: the tip-queue settings KickBot sends when they change (the delay between alerts, queue mode, tipping on/off, and the play/pause state sent with them) were dropped, so the app always waited its default 5 seconds between alerts. They now apply as soon as KickBot sends them, and a queue switched back to play continues at once. Values of the wrong type are ignored. Note: a queue paused in KickBot holds every alert (Kick subs and StreamElements tips too) until it is set to play again, the same as the «توقف» state shown on the Home page (thanks [SoroushRF](https://github.com/SoroushRF), [#12](https://github.com/AmirEyZed/sahne-plus/pull/12)).
@@ -17,11 +23,6 @@ All notable changes to the public builds. Versions follow semantic versioning.
 - Fixed: the in-app update could stay on «در حال دانلود» until the app was restarted when the connection stalled or the file could not be written (full disk, a file locked by an antivirus). A download that makes no progress for 60 seconds now stops, a write error stops it at once with its own message, the partial file is deleted, and «آپدیت» can be clicked again; a slow download that keeps moving is never cut off (thanks [SoroushRF](https://github.com/SoroushRF), [#9](https://github.com/AmirEyZed/sahne-plus/pull/9)). The update to 1.3.7 itself still runs through the previous version's updater, so this helps from the next update on.
 - Changed: disconnecting KickBot also removes KickBot's own dashboard test tips from the queue; Kick subs, StreamElements tips and the app's own test alerts stay queued (thanks [SoroushRF](https://github.com/SoroushRF), [#7](https://github.com/AmirEyZed/sahne-plus/pull/7)).
 - Project: CONTRIBUTING.md asks for CHANGELOG entries under "Unreleased", tests that run without network access, and a PRIVACY.md / DATA_FLOW.md update for new data stored on the computer.
-## 1.4.0 — unreleased
-
-- New: **آمار (Analytics)** page. From the moment this version is installed, every donation whose alert is shown is recorded locally (id, time, donor, amount + currency, toman value and rate at that instant, kind, source, whether the alert played) and the page aggregates it: totals in dollar and toman, count, average, median, largest, smallest, unique / repeat / new / returning donors, daily and hourly activity, top donors, amount buckets, per-kind and per-source breakdown, and a weekday × hour heatmap (hidden while the sample is too small to mean anything). Ranges: today, this week (Saturday-anchored), this month (Persian calendar), or a custom span. Toman values are the ones recorded at donation time, not today's rate — the page says so explicitly. History is bounded: one file per month, at most 5000 events a day, months older than the newest three collapsed into a monthly summary.
-- New: `/api/analytics` (read-only) and `analytics-ui.js`. The page is computed entirely on this computer from the app's own data; nothing leaves it. See PRIVACY.md and docs/DATA_FLOW.md.
-- New: a Settings switch «ثبت تاریخچه‌ی دونیت‌ها روی این کامپیوتر» under «برنامه» stops recording the donation history. It is on by default; switching it off writes nothing new and keeps what was already recorded (delete it with «پاک کردن همه‌ی داده‌های برنامه»). PRIVACY.md section 3 describes the history, its files and its bounds.
 
 ## 1.3.6 — 2026-09-26
 
